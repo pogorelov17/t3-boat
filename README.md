@@ -1,6 +1,6 @@
 # T3 + Boat
 
-Start with an idea in a T3 chat. When you are ready to build, connect a GitHub repository and let agents implement your first feature on disposable Boat VMs. Your server keeps the conversation. Code changes arrive as a draft pull request with two independent reviews.
+Open a T3 chat to work on an existing GitHub project or plan a new one. When you are ready to code, agents work on disposable Boat VMs. Your server keeps the conversation. Code changes arrive as a draft pull request with two independent reviews.
 
 [Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases) · [Role profiles](#role-profiles)
 
@@ -22,7 +22,12 @@ docker run -d --name t3-boat --restart unless-stopped \
 
 ### 2. Sign in
 
-On the server, run setup and sign in to the orchestrator. At **GitHub repository URL**, press **Enter** to start with an idea. Setup creates a T3 workspace called **Start here**. If an AI agent is installing this for you, ask it to choose this path and let you complete the account login.
+On the server, run setup and sign in to the orchestrator. At **GitHub repository URL**, choose how you want to start:
+
+- **Work on an existing project.** Paste its GitHub URL, select a Boat environment and follow the prompts to connect the workers.
+- **Explore an idea first.** Press **Enter**. Setup creates a workspace called **Start here** for planning.
+
+If an AI agent handles setup, give it your repository URL or tell it to start with an idea. Complete the account login yourself.
 
 ```sh
 docker exec -it t3-boat t3-boat setup
@@ -30,7 +35,7 @@ docker exec -it t3-boat t3-boat setup
 
 ### 3. Open your first chat
 
-In T3, select **Start here** and open a new chat. Write in your own words, in any language. You can ask a question, share an idea, or use an opening message suggested by the agent helping you get set up.
+In T3, select your repository, or **Start here** if you skipped the URL, and open a new chat. Write in your own words, in any language. You can ask a question, share an idea, or use an opening message suggested by the agent helping you get set up.
 
 <details>
 <summary><strong>First time connecting this computer?</strong></summary>
@@ -55,11 +60,11 @@ If you are unsure where to begin, ask the orchestrator for ideas. You can explor
 
 ## Build your first feature
 
-1. **Choose a repository.** For a new project, create a GitHub repository and select **Add a README** to give the first pull request a base commit. A README is enough. If you already have a repository with a default branch, use its URL. [Create a repository](https://github.com/new)
-2. **Connect workers.** Rerun `docker exec -it t3-boat t3-boat setup`, enter the repository URL, and select your Boat environment. Follow setup to connect the worker subscriptions and grant Boat permission to push branches and open PRs for this repository. Run `docker exec t3-boat t3-boat status` to check the binding. [Boat repositories](https://docs.boat.dev/environments/repositories) · [Worker credentials](https://docs.boat.dev/ai-credentials)
-3. **Continue the conversation.** The first repository attaches to **Start here**, so your plan stays in the same chat. When you are ready, ask for the first change you want. The executor implements it on Boat, checks the result, and opens a draft PR. Two reviewers examine the same commit. You decide when to merge.
+1. **Choose the repository for this change.** Use the URL of any GitHub repository you can work on. For a brand-new project, initializing the repository with a README gives the first PR a base commit.
+2. **Connect workers if needed.** If you already connected the repository during setup, continue to step 3. Otherwise, run `docker exec -it t3-boat t3-boat setup`, enter the repository URL, and select your Boat environment. Follow setup to connect the worker subscriptions and grant Boat permission to push branches and open PRs for this repository. Run `docker exec t3-boat t3-boat status` to check the binding. [Boat repositories](https://docs.boat.dev/environments/repositories) · [Worker credentials](https://docs.boat.dev/ai-credentials)
+3. **Continue the conversation.** Use your project chat. If you began in **Start here**, attaching the first repository keeps your planning thread there. When you are ready, ask for the first change you want. The executor implements it on Boat, checks the result, and opens a draft PR. Two reviewers examine the same commit. You decide when to merge.
 
-Already have a project? You can enter its URL during the initial setup and open a chat under its repository name. Rerun setup to register more projects.
+To work on another repository, run setup again and enter its URL.
 
 ## Role profiles
 

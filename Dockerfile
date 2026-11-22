@@ -37,7 +37,7 @@ RUN install -d -m 700 -o node -g node /data \
     && usermod --home /data node
 COPY bin/ /opt/t3-boat/bin/
 COPY profiles/ /opt/t3-boat/profiles/
-COPY policy/ /opt/t3-boat/policy/
+COPY skills/t3-boat/SKILL.md /opt/t3-boat/skills/t3-boat/SKILL.md
 RUN chmod 755 /opt/t3-boat/bin/* \
     && ln -s /opt/t3-boat/bin/boat-worker /usr/local/bin/boat-worker \
     && ln -s /opt/t3-boat/bin/t3-boat /usr/local/bin/t3-boat \

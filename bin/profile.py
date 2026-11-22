@@ -92,7 +92,7 @@ def prepare(name):
     for provider in OPTION:
         instances.setdefault(provider, {}).update(driver=provider, enabled=provider in enabled)
 
-    policy = (ROOT / "policy/SKILL.md").read_text()
+    policy = (ROOT / "skills/t3-boat/SKILL.md").read_text()
     table = ["## Active roles", "", "| Role | Provider | Model | Option |", "| --- | --- | --- | --- |"]
     for role, row in roles.items():
         table.append(f"| {role} | {row['provider']} | {row['model']} | {OPTION[row['provider']]}={row['effort']} |")

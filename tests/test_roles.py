@@ -47,9 +47,14 @@ class RoleTests(unittest.TestCase):
                     path = self.home / provider_dir / filename
                     self.assertEqual(path.exists() and "<!-- BEGIN t3-boat -->" in path.read_text(), selected)
                     if selected:
-                        skill = (path.parent / "skills/t3-boat/SKILL.md").read_text()
-                        self.assertIn("**Draft PR**", skill)
-                        self.assertIn("exact head SHA", skill)
+                        skill_path = path.parent / "skills/t3-boat/SKILL.md"
+                        self.assertIn(str(skill_path), path.read_text())
+                        installed = skill_path.read_text()
+                        shared = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip()
+                        self.assertTrue(installed.startswith(shared + "\n"))
+                        roles = json.loads((self.home / "profiles" / (name + ".json")).read_text())
+                        for role, row in roles.items():
+                            self.assertIn(f"| {role} | {row['provider']} | {row['model']} |", installed)
 
     def test_executor_cannot_review_even_with_a_different_effort(self):
         self.prepare("codex-only")

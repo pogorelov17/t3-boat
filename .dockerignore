@@ -1,8 +1,9 @@
 **
 !bin/
 !bin/*
-!policy/
-!policy/**
+!skills/
+!skills/t3-boat/
+!skills/t3-boat/SKILL.md
 !profiles/
 !profiles/*.json
 **/__pycache__/
