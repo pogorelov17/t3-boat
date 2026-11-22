@@ -157,10 +157,11 @@ def start(role_name):
     if role_name == "orchestrator" or role_name not in roles:
         raise ValueError("Select a child role from the active profile")
     # Only provision from a configured project stub; nothing on the host fetches origin.
-    origin = output("git", "config", "--local", "--get", "remote.origin.url")
-    environment = output("git", "config", "--local", "--get", "boat.environment")
-    if not origin or not environment:
-        raise ValueError("Run t3-boat setup to bind the current project")
+    binding = subprocess.run(["git", "config", "--local", "--get", "boat.environment"],
+                             text=True, capture_output=True)
+    environment = binding.stdout.strip()
+    if binding.returncode or not environment or not output("git", "config", "--local", "--get", "remote.origin.url"):
+        raise ValueError("Planning is ready in T3. Run t3-boat setup with a GitHub URL to enable coding on Boat.")
     name = "t3-worker-" + uuid.uuid4().hex[:12]
     print(f"Creating Boat worker {name} for {role_name}", flush=True)
     vm = provision(name, environment)
