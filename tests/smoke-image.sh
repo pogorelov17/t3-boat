@@ -33,16 +33,45 @@ for profile in codex-only claude-only codex+claude; do
     echo "Unexpected ready status for empty $profile volume" >&2
     exit 1
   fi
-  # Simulate only the local subscription login. Run setup, status and T3 offline.
+  # Exercise real setup, worker scripts and status against offline service doubles.
   docker exec -i "$container" sh -eu <<'SH'
 auth_tools=$(mktemp -d)
-printf '%s\n' '#!/bin/sh' 'echo "Logged in using ChatGPT"' > "$auth_tools/codex"
-printf '%s\n' '#!/bin/sh' "echo '{\"loggedIn\":true,\"apiProvider\":\"firstParty\",\"authMethod\":\"claude.ai\"}'" > "$auth_tools/claude"
+cat > "$auth_tools/boat" <<'MOCK'
+#!/bin/sh
+case "$1 $2" in
+  'status --check') exit 0 ;;
+  'env list') echo '{"environments":[{"id":"env1","name":"test","safeForThirdParties":false,"passGithub":true,"passAgentsCredentials":true}]}' ;;
+  'ai profiles') echo '{"profiles":[{"id":"creds","isDefault":true,"connected":["chatgpt-subscription","claude-subscription"]}]}' ;;
+  'new --json') touch "$HOME/check-vm"; echo '{"event":"ready","id":"bx_check"}' ;;
+  'ssh bx_check') sh -ec "$3" ;;
+  'delete --yes') test "$3" = bx_check && rm "$HOME/check-vm" ;;
+  *) exit 1 ;;
+esac
+MOCK
+cat > "$auth_tools/codex" <<'MOCK'
+#!/bin/sh
+case "$1" in
+  login) echo 'Logged in using ChatGPT' ;;
+  exec) echo BOAT_OK > reply ;;
+  *) exit 1 ;;
+esac
+MOCK
+cat > "$auth_tools/claude" <<'MOCK'
+#!/bin/sh
+case "$1" in
+  --version) echo 2.1.330 ;;
+  auth) echo '{"loggedIn":true,"apiProvider":"firstParty","authMethod":"oauth_token"}' ;;
+  -p) echo BOAT_OK ;;
+  *) exit 1 ;;
+esac
+MOCK
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$auth_tools/install-claude"
+printf '%s\n' '#!/bin/sh' 'test "$1" = api' > "$auth_tools/gh"
 chmod +x "$auth_tools"/*
 export PATH="$auth_tools:$PATH"
-printf '\n' | t3-boat setup
-t3-boat status | grep -F 'Ready to plan'
+printf '\n\n' | t3-boat setup
+test ! -e "$HOME/check-vm"
+t3-boat status | grep -F 'Setup verified'
 SH
   role_file="/data/profiles/$profile.json"
   provider=$(docker exec "$container" jq -er .orchestrator.provider "$role_file")
