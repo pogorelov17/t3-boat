@@ -1,8 +1,17 @@
 # T3 + Boat
 
-Open a T3 chat to work on an existing GitHub project or plan a new one. When you are ready to code, agents work on disposable Boat VMs. Your server keeps the conversation. Code changes arrive as a draft pull request with two independent reviews.
+Use a small Linux server to coordinate coding agents across your GitHub projects. Bring an idea or an existing repository, then work from a T3 chat using Codex, Claude, or both.
 
-[Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases) · [Role profiles](#role-profiles)
+[Quick start](#quick-start) · [Role profiles](#role-profiles) · [Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases)
+
+## How it works
+
+Suppose you ask in T3, “Fix the failing test and show me why it broke.”
+
+1. **T3 coordinates the work.** The orchestrator uses your installation’s role profile to select the executor and reviewers. New chats across your projects inherit those model and reasoning settings. If you are still discussing an idea, the conversation can stay in T3 until you have a task for a worker.
+2. **Boat runs the code.** The executor checks out the repository on a disposable VM, reproduces the failure, tests the fix and opens a draft PR. Dependencies, builds and test runs stay on Boat, so your server only needs to host T3 and its history.
+3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit. Both send independent verdicts to the orchestrator. A model that wrote the change cannot review it. If a fix is needed, a fresh executor updates the same PR and both reviewers check the new commit.
+4. **You decide when to merge.** The parent chat collects links to the agents, the test results, both verdicts and the PR. Once a worker’s result is recorded, its VM can be deleted. You can return to the chat or request another change on the PR without keeping workers running.
 
 ## Quick start
 
