@@ -51,6 +51,32 @@ class RoleTests(unittest.TestCase):
                         self.assertIn("**Draft PR**", skill)
                         self.assertIn("exact head SHA", skill)
 
+    def test_executor_cannot_review_even_with_a_different_effort(self):
+        self.prepare("codex-only")
+        path = self.home / "profiles/codex-only.json"
+        rows = json.loads(path.read_text())
+        for role in ("reviewer1", "reviewer2", "adjudicator"):
+            with self.subTest(role=role):
+                edited = dict(rows)
+                edited[role] = dict(rows["executor"], effort="low")
+                path.write_text(json.dumps(edited))
+                result = self.prepare("codex-only", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(role, result.stderr)
+                self.assertEqual(json.loads(path.read_text()), edited)
+
+    def test_stock_claude_volume_upgrades_to_independent_review(self):
+        path = self.home / "profiles/claude-only.json"
+        path.parent.mkdir()
+        old = json.loads((ROOT / "profiles/claude-only.json").read_text())
+        for role in ("reviewer2", "adjudicator"):
+            old[role] = dict(old["executor"])
+        path.write_text(json.dumps(old, indent=2) + "\n")
+        self.prepare("claude-only")
+        upgraded = json.loads(path.read_text())
+        for role in ("reviewer1", "reviewer2", "adjudicator"):
+            self.assertNotEqual(upgraded[role]["model"], upgraded["executor"]["model"])
+
     def test_profile_edits_take_effect_and_invalid_provider_fails_before_changes(self):
         self.prepare("claude-only")
         path = self.home / "profiles/claude-only.json"

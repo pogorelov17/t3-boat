@@ -76,15 +76,15 @@ jobs:
             docker image rm t3-boat:test "$tag"
           done
           docker buildx imagetools create --tag "$REPOSITORY:$version" "${sources[@]}"
-          echo "$REPOSITORY:$version" > docker-image.txt
-      - name: Attach the exact pull reference to the GitHub release
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null; then
-            printf 'Run this on the server, then choose a profile in the README.\n\n```sh\nexport IMAGE=%s\n```\n' \
-              "$(cat docker-image.txt)" > release-notes.md
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "$RELEASE_TAG" --notes-file release-notes.md
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exit 0
           fi
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" docker-image.txt --clobber
+          printf 'Docker image for Linux AMD64 and ARM64.\n\n```sh\ndocker pull %s:%s\n```\n\n[Quick start](https://github.com/%s/blob/%s/README.md#quick-start)\n' \
+            "$REPOSITORY" "${RELEASE_TAG#v}" "$GITHUB_REPOSITORY" "$RELEASE_TAG" > release-notes.md
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$RELEASE_TAG" --notes-file release-notes.md
