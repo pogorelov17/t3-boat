@@ -1,8 +1,14 @@
 **
 !bin/
 !bin/*
-!policy/
-!policy/**
+!lib/
+!lib/role_profile.py
+!scripts/
+!scripts/install-codex
+!scripts/install-claude
+!skills/
+!skills/t3-boat/
+!skills/t3-boat/SKILL.md
 !profiles/
 !profiles/*.json
 **/__pycache__/

@@ -92,7 +92,7 @@ def prepare(name):
     for provider in OPTION:
         instances.setdefault(provider, {}).update(driver=provider, enabled=provider in enabled)
 
-    policy = (ROOT / "policy/SKILL.md").read_text()
+    policy = (ROOT / "skills/t3-boat/SKILL.md").read_text()
     table = ["## Active roles", "", "| Role | Provider | Model | Option |", "| --- | --- | --- | --- |"]
     for role, row in roles.items():
         table.append(f"| {role} | {row['provider']} | {row['model']} | {OPTION[row['provider']]}={row['effort']} |")
@@ -133,7 +133,7 @@ def prepare(name):
 if __name__ == "__main__":
     try:
         if len(sys.argv) != 2:
-            raise ValueError("usage: profile.py PROFILE")
+            raise ValueError("usage: role_profile.py PROFILE")
         prepare(sys.argv[1])
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         sys.exit(f"T3 Boat profile: {exc}")

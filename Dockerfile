@@ -25,9 +25,10 @@ RUN set -eu; \
     echo "$boat_sha  /usr/local/bin/boat" | sha256sum -c -; \
     chmod 755 /usr/local/bin/boat; \
     curl -fsSL --retry 3 https://raw.githubusercontent.com/ariana-dot-dev/agent-server/boat-cli-v1.0.105/LICENSE -o /usr/share/doc/boat/LICENSE; \
-    npm install --global --no-fund --no-audit @openai/codex@0.171.0; \
-    npm cache clean --force; \
-    t3 --version; codex --version; boat --help >/dev/null
+    t3 --version; boat --help >/dev/null
+
+RUN --mount=type=bind,source=scripts/install-codex,target=/tmp/install-codex \
+    sh /tmp/install-codex && npm cache clean --force
 
 ENV HOME=/data \
     PATH=/opt/t3-boat/bin:/data/.local/bin:${PATH} \
@@ -36,8 +37,10 @@ ENV HOME=/data \
 RUN install -d -m 700 -o node -g node /data \
     && usermod --home /data node
 COPY bin/ /opt/t3-boat/bin/
+COPY lib/role_profile.py /opt/t3-boat/lib/role_profile.py
+COPY --chmod=755 scripts/install-claude /usr/local/bin/install-claude
 COPY profiles/ /opt/t3-boat/profiles/
-COPY policy/ /opt/t3-boat/policy/
+COPY skills/t3-boat/SKILL.md /opt/t3-boat/skills/t3-boat/SKILL.md
 RUN chmod 755 /opt/t3-boat/bin/* \
     && ln -s /opt/t3-boat/bin/boat-worker /usr/local/bin/boat-worker \
     && ln -s /opt/t3-boat/bin/t3-boat /usr/local/bin/t3-boat \

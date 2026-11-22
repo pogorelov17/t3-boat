@@ -17,7 +17,7 @@ class RoleTests(unittest.TestCase):
         self.env = {"HOME": str(self.home), "PATH": os.environ["PATH"], "PYTHONDONTWRITEBYTECODE": "1"}
 
     def prepare(self, profile, check=True):
-        return subprocess.run([sys.executable, str(ROOT / "bin/profile.py"), profile], env=self.env,
+        return subprocess.run([sys.executable, str(ROOT / "lib/role_profile.py"), profile], env=self.env,
                               capture_output=True, text=True, check=check)
 
     def test_all_profiles_switch_idempotently_and_preserve_user_settings(self):
@@ -47,9 +47,14 @@ class RoleTests(unittest.TestCase):
                     path = self.home / provider_dir / filename
                     self.assertEqual(path.exists() and "<!-- BEGIN t3-boat -->" in path.read_text(), selected)
                     if selected:
-                        skill = (path.parent / "skills/t3-boat/SKILL.md").read_text()
-                        self.assertIn("**Draft PR**", skill)
-                        self.assertIn("exact head SHA", skill)
+                        skill_path = path.parent / "skills/t3-boat/SKILL.md"
+                        self.assertIn(str(skill_path), path.read_text())
+                        installed = skill_path.read_text()
+                        shared = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip()
+                        self.assertTrue(installed.startswith(shared + "\n"))
+                        roles = json.loads((self.home / "profiles" / (name + ".json")).read_text())
+                        for role, row in roles.items():
+                            self.assertIn(f"| {role} | {row['provider']} | {row['model']} |", installed)
 
     def test_executor_cannot_review_even_with_a_different_effort(self):
         self.prepare("codex-only")

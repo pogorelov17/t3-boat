@@ -291,7 +291,7 @@ def main():
     if profile not in PROFILES:
         parser.error("set T3_BOAT_PROFILE to " + ", ".join(PROFILES))
     if args.command == "serve":
-        subprocess.run([sys.executable, str(Path(__file__).with_name("profile.py")), profile], check=True)
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/role_profile.py"), profile], check=True)
         os.chdir(Path.home())
         os.execvp("t3", ["t3", "--no-browser", "--host", "0.0.0.0", "--port", "3773"])
     if args.command == "setup":
