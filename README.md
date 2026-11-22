@@ -26,7 +26,7 @@ docker run -d --name t3-boat --restart unless-stopped \
   -p 127.0.0.1:3773:3773 \
   -v t3-boat-data:/data \
   -e T3_BOAT_PROFILE=codex+claude \
-  pogorelov17/t3-boat:0.1.2
+  pogorelov17/t3-boat:0.1.3
 ```
 
 ### 2. Connect your accounts and verify a worker
