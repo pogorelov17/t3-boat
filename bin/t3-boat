@@ -184,7 +184,7 @@ def setup(profile, providers):
         starter = Path.home() / "start-here"
         starter.mkdir(exist_ok=True)
         add_workspace(starter, "Start here")
-        print("Open Start here in T3 and describe what you want to build.")
+        print("Open Start here in T3. Write your own message or ask for ideas.")
         print("When ready to write code, rerun setup with your GitHub repository URL.")
         return
     if provider != "claude" and "claude" in providers:

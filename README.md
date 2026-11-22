@@ -30,7 +30,7 @@ docker exec -it t3-boat t3-boat setup
 
 ### 3. Open your first chat
 
-In T3, select **Start here** and open a new chat.
+In T3, select **Start here** and open a new chat. Write in your own words, in any language. You can ask a question, share an idea, or use an opening message suggested by the agent helping you get set up.
 
 <details>
 <summary><strong>First time connecting this computer?</strong></summary>
@@ -51,17 +51,13 @@ Open the printed link on your computer and keep the SSH session open.
 
 </details>
 
-Try this first message:
-
-> I want to build a reading list. Help me choose one feature for the first version. What should someone be able to do with it?
-
-The orchestrator replies in this chat. You can refine the idea here before spending any Boat VM time.
+If you are unsure where to begin, ask the orchestrator for ideas. You can explore them in this chat before starting a Boat VM.
 
 ## Build your first feature
 
 1. **Choose a repository.** For a new project, create a GitHub repository and select **Add a README** to give the first pull request a base commit. A README is enough. If you already have a repository with a default branch, use its URL. [Create a repository](https://github.com/new)
 2. **Connect workers.** Rerun `docker exec -it t3-boat t3-boat setup`, enter the repository URL, and select your Boat environment. Follow setup to connect the worker subscriptions and grant Boat permission to push branches and open PRs for this repository. Run `docker exec t3-boat t3-boat status` to check the binding. [Boat repositories](https://docs.boat.dev/environments/repositories) · [Worker credentials](https://docs.boat.dev/ai-credentials)
-3. **Continue the conversation.** The first repository attaches to **Start here**, so your plan stays in the same chat. Try: **“Build the reading list we planned. Let me add a title and see it in the list. Add a check for that behavior and open a draft PR.”** The executor sets up the project on Boat and runs the check. Two reviewers examine the same commit. You decide when to merge.
+3. **Continue the conversation.** The first repository attaches to **Start here**, so your plan stays in the same chat. When you are ready, ask for the first change you want. The executor implements it on Boat, checks the result, and opens a draft PR. Two reviewers examine the same commit. You decide when to merge.
 
 Already have a project? You can enter its URL during the initial setup and open a chat under its repository name. Rerun setup to register more projects.
 
