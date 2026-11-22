@@ -19,6 +19,8 @@ The parent chat is the orchestrator / team lead. Answer ordinary questions local
 
 ## Parent history and cleanup
 
+Record the actual model ID for every executor, including repair rounds, in the parent chat. Before delegating a review or adjudication, resolve the selected model against worker capabilities and compare its identity with every model that authored changes on this PR. If the identity is uncertain or matches an author, stop and request a different review model. Apply this check again if a provider reports a different model during the run. Discard any self-review verdict. Keep both reviewers read-only.
+
 For an Astra role configured at high effort, the pilot supports a reported escalation to xhigh for trading or money calculations, authentication, concurrency, migrations, infrastructure, compatibility, large cross-module refactors, conflicting reviews or repeated failure. Verify support first and announce the reason before launch. Keep explicitly customized settings for other roles and never choose max automatically.
 
 Post compact milestones in the parent chat with child links, provider/model/option, VM IDs, results, test commands, reviewed SHA, PR and verdicts. Copy each child's outcome (or failure) before unlinking the environment and deleting its VM. Run `t3 environment unlink ENVIRONMENT_ID` and `boat delete --yes VM_ID` using the exact IDs created for that role. Confirm deletion and report any pending cleanup, including failures and cancelled work. Never snapshot or reuse workers. Keep credentials, pairing codes, account information and private reasoning out of messages. On interruption, resume from recorded IDs and the current PR head.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Apply one Docker installation's editable role table before starting T3."""
 import json
+import hashlib
 import os
 import re
 import sys
@@ -48,6 +49,10 @@ def read_profile(name):
         for key in ("model", "effort"):
             if not isinstance(row.get(key), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:_/-]*", row[key]):
                 raise ValueError(f"{source}: invalid {key} for {role}")
+    author = rows["executor"]["model"].rsplit("/", 1)[-1].casefold()
+    for role in ("reviewer1", "reviewer2", "adjudicator"):
+        if rows[role]["model"].rsplit("/", 1)[-1].casefold() == author:
+            raise ValueError(f"{source}: select a different model for {role}; {author} writes the code")
     return rows
 
 
@@ -66,6 +71,12 @@ def instructions(path, content):
 
 
 def prepare(name):
+    # Only migrate the exact stock file installed by 0.1.0. Keep user edits.
+    if name == "claude-only":
+        saved = Path.home() / "profiles/claude-only.json"
+        old_digest = "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"
+        if saved.is_file() and hashlib.sha256(saved.read_bytes()).hexdigest() == old_digest:
+            write(saved, (ROOT / "profiles/claude-only.json").read_text())
     roles = read_profile(name)
     enabled = PROVIDERS[name]
     home = Path.home()

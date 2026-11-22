@@ -16,7 +16,7 @@
   },
   "reviewer2": {
     "provider": "claudeAgent",
-    "model": "claude-opus-5-5",
+    "model": "claude-sonnet-5-5",
     "effort": "high"
   },
   "scout": {
@@ -31,7 +31,7 @@
   },
   "adjudicator": {
     "provider": "claudeAgent",
-    "model": "claude-opus-5-5",
+    "model": "claude-fable-5-2",
     "effort": "high"
   }
 }

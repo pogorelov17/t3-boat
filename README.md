@@ -1,111 +1,102 @@
 # T3 + Boat
 
-Open a T3 project chat and ask it to run tests or make a change. T3 keeps the conversation on your server. Its orchestrator delegates repository work to agents on fresh Boat VMs. Each project gets its own GitHub repository and Boat environment. The same role profile applies to new chats across the installation.
+Run a coding team from one T3 chat. Your server keeps the conversation. Disposable Boat VMs check out the repository, run tests, and review changes. You get a draft pull request and two independent reviews of the same commit.
+
+[Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases) · [Role profiles](#role-profiles)
 
 ## Quick start
 
-**1. Get the published image reference.** On a Linux server with Docker Engine, run `docker version` and check that it prints a Server section. You also need SSH access, a Boat account and the subscription(s) for your profile. [Install Docker Engine](https://docs.docker.com/engine/install/).
+You need a Linux server with Docker Engine and SSH, a Boat account, and the subscriptions for your chosen profile. The image supports AMD64 and ARM64. [Install Docker Engine](https://docs.docker.com/engine/install/).
 
-Open the project's GitHub **Releases** page. Copy the `export IMAGE=...` command for the release you want and run it on the server. Then run one of the commands below. Docker downloads the matching image for the server's architecture on first use. This path becomes available with the first public release.
+### 1. Start the container
 
-For automated installation, the same release includes a one-line `docker-image.txt` asset with the exact image reference.
-
-**2. Start one profile.** Run one command on the server, in the shell where you set `IMAGE`.
-
-**Codex only** — Astra orchestrates, Luna scouts, Sol researches and implements, and Astra and Sol review.
+Run this on the server. Set `T3_BOAT_PROFILE` to `codex-only`, `claude-only`, or `codex+claude`. Docker downloads the published image on first use.
 
 ```sh
-docker run -d --name t3-boat --restart unless-stopped -p 127.0.0.1:3773:3773 -v t3-boat-data:/data -e T3_BOAT_PROFILE=codex-only "$IMAGE"
+docker run -d --name t3-boat --restart unless-stopped \
+  -p 127.0.0.1:3773:3773 \
+  -v t3-boat-data:/data \
+  -e T3_BOAT_PROFILE=codex+claude \
+  pogorelov17/t3-boat:0.1.1
 ```
 
-**Claude only** — Opus orchestrates, researches and implements. Haiku scouts, and Fable and Opus review.
-
-```sh
-docker run -d --name t3-boat --restart unless-stopped -p 127.0.0.1:3773:3773 -v t3-boat-data:/data -e T3_BOAT_PROFILE=claude-only "$IMAGE"
-```
-
-**Codex + Claude** — Astra orchestrates, Haiku scouts, Sol researches, Opus implements, Fable and Astra review.
-
-```sh
-docker run -d --name t3-boat --restart unless-stopped -p 127.0.0.1:3773:3773 -v t3-boat-data:/data -e 'T3_BOAT_PROFILE=codex+claude' "$IMAGE"
-```
-
-**3. Connect accounts and register your project.**
+### 2. Connect your accounts and project
 
 ```sh
 docker exec -it t3-boat t3-boat setup
 docker exec t3-boat t3-boat status
 ```
 
-Have your GitHub repository URL and Boat environment name ready. The local provider login runs the orchestrator. Boat's AI credentials authorize agents on new VMs. Claude-enabled installations download Claude Code during setup. Connect GitHub to Boat and grant access to the target repository, including pushing a branch and opening a pull request. Instructions for the repository and subscription connections are in the [Boat repository guide](https://docs.boat.dev/environments/repositories) and [Boat AI credential guide](https://docs.boat.dev/ai-credentials).
+Have your GitHub repository URL and Boat environment name ready. Sign in to the orchestrator on the server, connect your worker subscriptions in Boat, and grant Boat permission to push branches and open pull requests for the project. If an agent runs setup for you, complete the sign-in prompts in your own browser or terminal. Repeat `setup` to add another project. [Boat repositories](https://docs.boat.dev/environments/repositories) · [Worker credentials](https://docs.boat.dev/ai-credentials).
 
-If an AI agent handles the installation, let the owner complete the browser or device login in their terminal. Resume with `setup` and `status`. Keep login codes and pairing codes out of chat. Setup registers an empty project directory with the Git remote and Boat environment. The repository checkout lives on Boat.
+### 3. Open your first chat
 
-**4. Open T3 from your computer.** Leave this command running on the computer, using your server's SSH login:
+From your computer, open an SSH tunnel and leave it running. Replace `USER@SERVER` with your usual SSH login.
 
 ```sh
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:3773:127.0.0.1:3773 USER@SERVER
 ```
 
-Open **http://127.0.0.1:3773**. To pair the browser, run the following in a second SSH session and open the printed loopback pairing link on the computer running the tunnel. Select the project and open a new chat.
+Open **http://127.0.0.1:3773**. To pair a new browser or desktop client, run this in a second SSH session and open the printed link on the computer running the tunnel.
 
 ```sh
 docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url http://127.0.0.1:3773
 ```
 
-| First message | What to look for |
-| --- | --- |
-| «Какой профиль сейчас активен?» | The orchestrator identifies the profile. A general question costs no VM time. |
-| «Запусти тесты» | A child agent runs tests on Boat. The parent reports the result before releasing the VM. |
-| «Исправь падающий тест» | The executor opens a Draft PR. Two independent reviewers examine the same commit on separate VMs. |
+Choose the project, open a chat, and ask **“Run the tests.”** The parent chat records the worker link, commit, test command, and result before releasing the VM. Ask **“Fix the failing test”** to start a change. The executor opens a draft PR. Two reviewers check its head commit on separate VMs. Each revision gets a fresh review from both. You decide when to merge.
 
-The parent chat keeps the child links, models, requested reasoning, test results, commit and verdicts. Fixes go to the same PR on a fresh VM. Both reviewers check the new head SHA. The owner decides when to merge.
+## Role profiles
 
-## Default models by role
+The profile applies to new chats across all projects on this server. Each entry shows the model and its default reasoning effort.
 
-Each cell shows the configured model and reasoning level. Both reviewers independently check the same commit.
-
-| Role | `codex-only` | `claude-only` | `codex+claude` |
+| Role | Codex only | Claude only | Codex + Claude |
 | --- | --- | --- | --- |
-| Orchestrator / team lead | `gpt-6.2-astra` · high | `claude-opus-5-5` · high | `gpt-6.2-astra` · high |
-| Code scout | `gpt-6-luna` · low | `claude-haiku-5-5` · medium | `claude-haiku-5-5` · medium |
-| Internet researcher | `gpt-6.2-sol` · high | `claude-opus-5-5` · high | `gpt-6.2-sol` · high |
-| Executor | `gpt-5.6-sol` · medium | `claude-opus-5-5` · high | `claude-opus-5-5` · high |
-| Independent reviewer 1 | `gpt-6.2-astra` · high | `claude-fable-5-2` · high | `claude-fable-5-2` · high |
-| Independent reviewer 2 | `gpt-6.2-sol` · high | `claude-opus-5-5` · high | `gpt-6.2-astra` · high |
-| Adjudicator for disputed reviews | `gpt-6.2-astra` · xhigh | `claude-opus-5-5` · high | `gpt-6.2-astra` · xhigh |
+| Orchestrator | Astra 6.2 · high | Opus 5.5 · high | Astra 6.2 · high |
+| Code scout | Luna 6 · low | Haiku 5.5 · medium | Haiku 5.5 · medium |
+| Internet researcher | Sol 6.2 · high | Opus 5.5 · high | Sol 6.2 · high |
+| **Executor** | **Sol 5.6 · medium** | **Opus 5.5 · high** | **Opus 5.5 · high** |
+| Reviewer 1 | Astra 6.2 · high | Fable 5.2 · high | Fable 5.2 · high |
+| Reviewer 2 | Sol 6.2 · high | Sonnet 5.5 · high | Astra 6.2 · high |
+| Disputed reviews | Astra 6.2 · xhigh | Fable 5.2 · high | Astra 6.2 · xhigh |
 
-## Change roles and add projects
+The executor's model must differ from both reviewers and the model that settles disputes. The orchestrator checks model availability before delegation. [Codex profile](profiles/codex-only.json) · [Claude profile](profiles/claude-only.json) · [Combined profile](profiles/codex+claude.json).
 
-The installation keeps its editable role tables in `/data/profiles/`. To change a model or reasoning level, copy the active file out, edit it, copy it back and restart the container before opening a new chat. The example uses the combined profile:
+<details>
+<summary><strong>Customize models and reasoning</strong></summary>
+
+The editable profile lives in the Docker volume. In this example, change `PROFILE` to match the running container, copy the role table out, and edit the model IDs or effort levels in `roles.json`.
 
 ```sh
-docker cp 't3-boat:/data/profiles/codex+claude.json' ./roles.json
-# Edit roles.json using the existing schema.
-docker exec -i t3-boat sh -c 'cat > "$HOME/profiles/codex+claude.json.new" && mv "$HOME/profiles/codex+claude.json.new" "$HOME/profiles/codex+claude.json"' < roles.json
+PROFILE=codex+claude
+docker cp "t3-boat:/data/profiles/$PROFILE.json" ./roles.json
+```
+
+Apply your edits, then open a new chat.
+
+```sh
+docker exec -i t3-boat sh -ec 'p="$HOME/profiles/$T3_BOAT_PROFILE.json"; cat > "$p.new" && mv "$p.new" "$p"' < roles.json
 docker restart t3-boat
 docker exec t3-boat t3-boat status
 ```
 
-Repeat `setup` to add a project. Use a Boat environment scoped to that project's GitHub access. A new chat inherits the installation profile. If a model is unavailable for the selected account, the role instructions require the orchestrator to report the mismatch and ask before substituting a model.
+</details>
 
-## Persistence
+<details>
+<summary><strong>Keep your history when updating</strong></summary>
 
-Reuse the named volume `t3-boat-data` when replacing the container or upgrading the image. It holds T3 history, project registrations, role settings and account logins. Back up the volume privately. Wait for active jobs to finish before replacing the container. On restart, open the parent chat and ask the orchestrator to continue if a run was interrupted.
+Finish active jobs and back up the named volume privately. Stop and remove the old container, then repeat the start command with the new image tag, the same profile, and the same `t3-boat-data` volume. It holds chat history, project bindings, role settings, and account logins.
 
-## Build a customized image
+The stock Claude profile from 0.1.0 upgrades automatically. If you customized that profile, assign reviewer and adjudicator models distinct from the executor before upgrading.
 
-When changing the Dockerfile, bundled tools or orchestration instructions, run the following in your modified source checkout, then continue at Quick start step 2:
+</details>
+
+<details>
+<summary><strong>Build a customized image</strong></summary>
+
+To change the packaged tools or orchestration instructions, build from your edited source checkout. Use `t3-boat:local` in the start command.
 
 ```sh
-export IMAGE=t3-boat:local
-docker build -t "$IMAGE" .
+docker build -t t3-boat:local .
 ```
 
-For installation-specific models and reasoning levels, edit the role table in the data volume as described above.
-
-## Building a release
-
-The GitHub Actions workflow builds and tests Linux amd64 and arm64. A maintainer creates a **public** Docker Hub repository, sets the GitHub repository variable `DOCKERHUB_REPOSITORY` (`namespace/image`), and configures the secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for publishing. Pushing a tag such as `v1.0.0` runs the checks, publishes the tested images under one version tag and attaches the pull reference to the GitHub release.
-
-The offline smoke check starts each profile, creates a T3 project and thread, replaces the container and checks that the thread survives. A release candidate also needs an account-backed run for each profile: start a change from a new chat, check the Draft PR and both reviews against its final SHA, and confirm the workers were deleted. Record the actual models and which checks passed.
+</details>
