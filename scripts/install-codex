@@ -1,0 +1,6 @@
+#!/bin/sh
+# Install the coordinator's Codex CLI when building the Docker image.
+set -eu
+version=0.171.0
+npm install --global --no-fund --no-audit "@openai/codex@$version"
+codex --version

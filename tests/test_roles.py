@@ -17,7 +17,7 @@ class RoleTests(unittest.TestCase):
         self.env = {"HOME": str(self.home), "PATH": os.environ["PATH"], "PYTHONDONTWRITEBYTECODE": "1"}
 
     def prepare(self, profile, check=True):
-        return subprocess.run([sys.executable, str(ROOT / "bin/profile.py"), profile], env=self.env,
+        return subprocess.run([sys.executable, str(ROOT / "lib/role_profile.py"), profile], env=self.env,
                               capture_output=True, text=True, check=check)
 
     def test_all_profiles_switch_idempotently_and_preserve_user_settings(self):

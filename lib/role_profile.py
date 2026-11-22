@@ -133,7 +133,7 @@ def prepare(name):
 if __name__ == "__main__":
     try:
         if len(sys.argv) != 2:
-            raise ValueError("usage: profile.py PROFILE")
+            raise ValueError("usage: role_profile.py PROFILE")
         prepare(sys.argv[1])
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         sys.exit(f"T3 Boat profile: {exc}")

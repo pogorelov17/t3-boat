@@ -64,7 +64,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_planning_setup_skips_boat_then_attaches_first_repo_in_place(self):
         profile = "codex-only"
-        subprocess.run(["python3", str(ROOT / "bin/profile.py"), profile], check=True)
+        subprocess.run(["python3", str(ROOT / "lib/role_profile.py"), profile], check=True)
         with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
                 patch.object(cli, "add_workspace") as add, patch("builtins.input", return_value=""), \
                 patch.object(cli, "boat_records", side_effect=AssertionError("Unexpected Boat access")), \
@@ -94,7 +94,7 @@ class RuntimeTests(unittest.TestCase):
             return ""
         for profile, providers in cli.PROFILES.items():
             with self.subTest(profile=profile):
-                subprocess.run(["python3", str(ROOT / "bin/profile.py"), profile], check=True)
+                subprocess.run(["python3", str(ROOT / "lib/role_profile.py"), profile], check=True)
                 self.profiles[0]["connected"] = [cli.SUBSCRIPTIONS[p] for p in providers]
                 calls.clear()
                 with patch.object(cli, "boat_records", side_effect=[[self.boat_env], self.profiles]), \
