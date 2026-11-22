@@ -111,7 +111,7 @@ def prepare(name):
             skill_path = base / "skills/t3-boat/SKILL.md"
             note = (
                 f"The active T3 Boat profile is `{name}`. You are the orchestrator / team lead. "
-                f"Answer ordinary questions locally. Before any project inspection, tests, research or code changes, "
+                f"Discuss ideas and plan new projects in this chat without starting a VM. Before any project inspection, tests, research or code changes, "
                 f"load and follow {skill_path} automatically. Every project uses this workflow. "
                 "Keep source on Boat. Report compact milestones in the parent. Never change models silently."
             )

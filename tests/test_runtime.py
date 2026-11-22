@@ -62,6 +62,29 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("transport 'https' not allowed", fetch.stderr)
             self.assertEqual(fetch.returncode, 128)
 
+    def test_planning_setup_skips_boat_then_attaches_first_repo_in_place(self):
+        profile = "codex-only"
+        subprocess.run(["python3", str(ROOT / "bin/profile.py"), profile], check=True)
+        with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
+                patch.object(cli, "add_workspace") as add, patch("builtins.input", return_value=""), \
+                patch.object(cli, "boat_records", side_effect=AssertionError("Unexpected Boat access")), \
+                patch.object(cli, "probe", side_effect=lambda *a: "[]" if a[0] == "t3" else self.fail(a)), \
+                redirect_stdout(StringIO()) as out:
+            cli.setup(profile, cli.PROFILES[profile])
+            workspace = Path(self.home.name, "start-here")
+            add.assert_called_once_with(workspace, "Start here")
+            self.assertEqual(cli.status(profile, cli.PROFILES[profile]), 0)
+            self.assertIn("Ready to plan", out.getvalue())
+        with patch.object(cli, "add_workspace") as add, redirect_stdout(StringIO()):
+            cli.register("owner/first", "base")
+            cli.register("owner/first", "base")
+            cli.register("owner/second", "other")
+            self.assertEqual([c.args[0] for c in add.call_args_list],
+                             [workspace, workspace, Path(self.home.name, "projects/owner/second")])
+            self.assertEqual(len(cli.projects()), 2)
+            self.assertEqual(subprocess.check_output(["git", "-C", workspace, "remote", "get-url", "origin"],
+                                                     text=True).strip(), "https://github.com/owner/first.git")
+
     def test_status_verifies_only_enabled_subscriptions_without_vm(self):
         calls = []
         def probe(*args):

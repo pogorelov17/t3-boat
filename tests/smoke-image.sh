@@ -33,23 +33,34 @@ for profile in codex-only claude-only codex+claude; do
     echo "Unexpected ready status for empty $profile volume" >&2
     exit 1
   fi
-  docker exec "$container" mkdir /data/smoke-project
-  docker exec "$container" t3 project add /data/smoke-project
+  # Simulate only the local subscription login. Run setup, status and T3 offline.
+  docker exec -i "$container" sh -eu <<'SH'
+auth_tools=$(mktemp -d)
+printf '%s\n' '#!/bin/sh' 'echo "Logged in using ChatGPT"' > "$auth_tools/codex"
+printf '%s\n' '#!/bin/sh' "echo '{\"loggedIn\":true,\"apiProvider\":\"firstParty\",\"authMethod\":\"claude.ai\"}'" > "$auth_tools/claude"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$auth_tools/install-claude"
+chmod +x "$auth_tools"/*
+export PATH="$auth_tools:$PATH"
+printf '\n' | t3-boat setup
+t3-boat status | grep -F 'Ready to plan'
+SH
   role_file="/data/profiles/$profile.json"
   provider=$(docker exec "$container" jq -er .orchestrator.provider "$role_file")
   model=$(docker exec "$container" jq -er .orchestrator.model "$role_file")
   # No accounts, networking or worker VM: only the transcript is under test.
-  thread=$(docker exec "$container" t3 thread start /data/smoke-project 'Offline persistence check' \
+  thread=$(docker exec "$container" t3 thread start /data/start-here 'Help me plan a small app' \
     --provider "$provider" --model "$model" --json | jq -er .threadId)
   docker exec "$container" t3 auth pairing create --ttl 2m --json >/dev/null
   environment=$(docker exec "$container" cat /data/.t3/userdata/environment-id)
   [[ -n "$environment" ]]
+  docker exec "$container" python3 -c 'import runpy; runpy.run_path("/opt/t3-boat/bin/t3-boat")["register"]("sample/new-app", "test")'
+  [[ $(docker exec "$container" git -C /data/start-here remote get-url origin) = https://github.com/sample/new-app.git ]]
   docker stop "$container" >/dev/null
   docker rm "$container" >/dev/null
   container=
   start
   [[ $(docker exec "$container" cat /data/.t3/userdata/environment-id) = "$environment" ]]
-  docker exec "$container" t3 thread list --project /data/smoke-project --json |
+  docker exec "$container" t3 thread list --project /data/start-here --json |
     jq -e --arg id "$thread" 'any(.[]; .threadId == $id)' >/dev/null
   cleanup
   container=

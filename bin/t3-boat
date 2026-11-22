@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run and provision the persistent T3 coordinator."""
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -112,15 +113,38 @@ def has_repo(env, slug):
 
 
 def projects():
-    return sorted((Path.home() / "projects").glob("*/*/.git"))
+    bound = sorted((Path.home() / "projects").glob("*/*/.git"))
+    starter = Path.home() / "start-here"
+    if (starter / ".git").is_dir() and probe("git", "-C", str(starter), "config", "--local", "--get", "boat.environment"):
+        bound.append(starter / ".git")
+    return bound
+
+
+def add_workspace(workspace, title):
+    result = subprocess.run(["t3", "project", "add", "--title", title, str(workspace)],
+                            capture_output=True, text=True)
+    if result.returncode and "An active project already exists for" not in result.stdout + result.stderr:
+        raise SetupError("T3 could not register the workspace. Check that the server is running and retry setup.")
 
 
 def register(slug, label):
+    # Concurrent setup sessions can both try to claim the first chat.
+    with (Path.home() / ".t3-boat-register.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        bind_project(slug, label)
+
+
+def bind_project(slug, label):
     workspace = Path.home() / "projects" / slug
     origin = "https://github.com/" + slug + ".git"
+    starter = Path.home() / "start-here"
+    if starter.is_dir() and not workspace.exists():
+        attached = probe("git", "config", "--file", str(starter / ".git/config"), "--get", "remote.origin.url")
+        if not attached or attached.lower() == origin.lower():
+            workspace = starter
     if workspace.exists():
         current = probe("git", "-C", str(workspace), "config", "--local", "--get", "remote.origin.url")
-        if not (workspace / ".git").is_dir() or current and current.lower() != origin.lower():
+        if (workspace != starter and not (workspace / ".git").is_dir()) or (current and current.lower() != origin.lower()):
             raise SetupError(f"Existing directory {workspace} belongs to another project.")
     workspace.mkdir(parents=True, exist_ok=True)
     git = ["git", "-C", str(workspace)]
@@ -128,10 +152,7 @@ def register(slug, label):
     run(*git, "config", "--local", "protocol.allow", "never")
     run(*git, "config", "--local", "remote.origin.url", origin)
     run(*git, "config", "--local", "boat.environment", label)
-    result = subprocess.run(["t3", "project", "add", "--title", slug.rsplit("/", 1)[1], str(workspace)],
-                            capture_output=True, text=True)
-    if result.returncode and "An active project already exists for" not in result.stdout + result.stderr:
-        raise SetupError("T3 could not register the workspace. Check that the server is running and retry setup.")
+    add_workspace(workspace, "Start here" if workspace == starter else slug.rsplit("/", 1)[1])
     print(f"Registered {slug} in T3 at {workspace}.")
 
 
@@ -146,13 +167,9 @@ def parent_role(profile):
 def setup(profile, providers):
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
-    if probe("boat", "status", "--check") is None:
-        run("boat", "onboard", "--wait")
-        if probe("boat", "status", "--check") is None:
-            raise SetupError("Boat login is incomplete. Rerun setup after approving the device.")
-    if "claude" in providers:
-        run("install-claude")
     provider = {"claudeAgent": "claude", "codex": "codex"}[parent_role(profile)["provider"]]
+    if provider == "claude":
+        run("install-claude")
     if not logged_in(provider):
         if provider == "codex":
             run("codex", "login", "--device-auth")
@@ -160,13 +177,26 @@ def setup(profile, providers):
             run("claude", "auth", "login")
         if not logged_in(provider):
             raise SetupError(f"A {provider} subscription login is required. Rerun setup to resume.")
+    existing = projects()
+    optional = " (Enter to resume existing projects)" if existing else " (Enter to start with an idea)"
+    url = input(f"GitHub repository URL{optional}: ").strip()
+    if not url and not existing:
+        starter = Path.home() / "start-here"
+        starter.mkdir(exist_ok=True)
+        add_workspace(starter, "Start here")
+        print("Open Start here in T3 and describe what you want to build.")
+        print("When ready to write code, rerun setup with your GitHub repository URL.")
+        return
+    if provider != "claude" and "claude" in providers:
+        run("install-claude")
+    if probe("boat", "status", "--check") is None:
+        run("boat", "onboard", "--wait")
+        if probe("boat", "status", "--check") is None:
+            raise SetupError("Boat login is incomplete. Rerun setup after approving the device.")
     print("In Boat, connect the GitHub App for your repository with Contents and Pull requests write access.")
     print(f"GitHub and environment: {BOAT_ENV}\nWorker subscriptions: {BOAT_AI}")
-    existing = projects()
-    optional = " (Enter to resume existing projects)" if existing else ""
-    url = input(f"GitHub repository URL{optional}: ").strip()
     envs = boat_records(["env", "list"], "environments")
-    if url or not existing:
+    if url:
         slug = repo_slug(url)
         print("Boat environments:", ", ".join(e["name"] for e in envs))
         env = env_for(envs, input("Boat environment name or ID: ").strip())
@@ -180,7 +210,6 @@ def setup(profile, providers):
     profiles = boat_records(["ai", "profiles"], "profiles")
     for slug, label in selected:
         env = env_for(envs, label)
-        register(slug, env["name"])
         check_access(env, profiles, providers)
         if not has_repo(env, slug):
             if input(f"Attach {slug} to Boat environment {env['name']}? [y/N] ").strip().lower() != "y":
@@ -189,6 +218,7 @@ def setup(profile, providers):
             envs = boat_records(["env", "list"], "environments")
             if not has_repo(env_for(envs, env["id"]), slug):
                 raise SetupError("Repository attachment is still unconfirmed. Check Boat and rerun setup.")
+        register(slug, env["name"])
     print("For a fresh pairing link through your SSH tunnel, run on the VPS:")
     print("docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url " + LOCAL_URL)
 
@@ -221,11 +251,18 @@ def status(profile, providers):
     if active:
         provider = {"codex": "codex", "claudeAgent": "claude"}[orchestrator["provider"]]
         report(f"Local {provider} orchestrator subscription login", logged_in(provider))
-    boat = probe("boat", "status", "--check") is not None
-    report("Boat account", boat)
     registered = projects()
-    report("Project workspace configured", bool(registered))
-    if boat and registered:
+    starter = Path.home() / "start-here"
+    if not registered:
+        report("Start here workspace", starter.is_dir() and
+               probe("t3", "thread", "list", "--project", str(starter), "--json") is not None)
+        if not failures:
+            print("Ready to plan. Rerun setup with a GitHub repository URL to enable Boat workers.")
+            return 0
+    boat = bool(registered) and probe("boat", "status", "--check") is not None
+    if registered:
+        report("Boat account", boat)
+    if boat:
         envs = boat_records(["env", "list"], "environments")
         profiles = boat_records(["ai", "profiles"], "profiles")
         for git_dir in registered:
