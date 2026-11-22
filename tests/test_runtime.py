@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 cli = SourceFileLoader("t3_boat_runtime", str(ROOT / "bin/t3-boat")).load_module()
 
 
+worker = SourceFileLoader("boat_worker", str(ROOT / "bin/boat-worker")).load_module()
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.TemporaryDirectory()
@@ -62,19 +65,20 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("transport 'https' not allowed", fetch.stderr)
             self.assertEqual(fetch.returncode, 128)
 
-    def test_planning_setup_skips_boat_then_attaches_first_repo_in_place(self):
+    def test_planning_setup_verifies_boat_then_attaches_first_repo_in_place(self):
         profile = "codex-only"
         subprocess.run(["python3", str(ROOT / "lib/role_profile.py"), profile], check=True)
         with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
                 patch.object(cli, "add_workspace") as add, patch("builtins.input", return_value=""), \
-                patch.object(cli, "boat_records", side_effect=AssertionError("Unexpected Boat access")), \
-                patch.object(cli, "probe", side_effect=lambda *a: "[]" if a[0] == "t3" else self.fail(a)), \
+                patch.object(cli, "boat_records", side_effect=[[self.boat_env], self.profiles] * 2), \
+                patch.object(cli, "run") as run, patch.object(cli, "probe", return_value=""), \
                 redirect_stdout(StringIO()) as out:
             cli.setup(profile, cli.PROFILES[profile])
             workspace = Path(self.home.name, "start-here")
             add.assert_called_once_with(workspace, "Start here")
             self.assertEqual(cli.status(profile, cli.PROFILES[profile]), 0)
-            self.assertIn("Ready to plan", out.getvalue())
+            self.assertIn(("boat-worker", "verify", "abc"), [c.args for c in run.call_args_list])
+            self.assertIn("Repository access deferred", out.getvalue())
         with patch.object(cli, "add_workspace") as add, redirect_stdout(StringIO()):
             cli.register("owner/first", "base")
             cli.register("owner/first", "base")
@@ -102,11 +106,11 @@ class RuntimeTests(unittest.TestCase):
                         patch.object(cli, "logged_in", return_value=True) as auth, \
                         patch.object(cli, "projects", return_value=[Path(self.home.name, "projects/owner/example/.git")]), \
                         redirect_stdout(StringIO()):
-                    self.assertEqual(cli.status(profile, providers), 0)
-                self.assertEqual([c.args[0] for c in auth.call_args_list], ["claude" if profile == "claude-only" else "codex"])
+                    self.assertEqual(cli.status(profile, providers), 1)  # no live check yet
+                self.assertEqual([c.args[0] for c in auth.call_args_list], list(providers))
                 self.assertFalse(any(c[:2] == ("boat", "new") for c in calls))
 
-    def test_setup_resumes_project_and_checks_boat_without_local_worker_login(self):
+    def test_setup_resumes_project_and_checks_both_local_logins(self):
         git_dir = Path(self.home.name, "projects/owner/example/.git")
         def probe(*args):
             if args[-1] == "remote.origin.url":
@@ -123,10 +127,32 @@ class RuntimeTests(unittest.TestCase):
                 patch.object(cli, "boat_records", side_effect=[[empty], credentials, [self.boat_env]]), \
                 patch("builtins.input", side_effect=["", "y"]), redirect_stdout(StringIO()):
             cli.setup("codex+claude", cli.PROFILES["codex+claude"])
-        auth.assert_called_once_with("claude")
+        self.assertEqual([c.args[0] for c in auth.call_args_list], ["codex", "claude"])
         register.assert_called_once_with("owner/example", "base")
         self.assertEqual([call.args for call in run.call_args_list], [
-            ("install-claude",), ("boat", "env", "add-repo", "base", "owner/example")])
+            ("install-claude",), ("boat", "env", "add-repo", "base", "owner/example"),
+            ("boat-worker", "verify", "abc", "owner/example")])
+
+    def test_failed_model_reply_or_cleanup_fails_worker_check(self):
+        for failure in ("reply", "delete"):
+            with self.subTest(failure=failure):
+                calls = []
+
+                def remote(argv, **kwargs):
+                    calls.append(argv)
+                    if ((failure == "reply" and argv[1] == "ssh" and "claude -p" in argv[-1])
+                            or (failure == "delete" and argv[1] == "delete")):
+                        raise subprocess.CalledProcessError(1, argv)
+
+                with patch.dict(os.environ, T3_BOAT_PROFILE="codex+claude"), \
+                        patch.object(worker, "provision", return_value="bx_check"), \
+                        patch.object(worker.subprocess, "run", side_effect=remote), redirect_stdout(StringIO()), \
+                        self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                    worker.verify("base", "owner/example")
+                self.assertEqual(calls[-1], ["boat", "delete", "--yes", "bx_check"])
+                scripts = [c[-1] for c in calls if c[1] == "ssh"]
+                for expected in ("gh api", "ls-remote", "claude -p", "codex exec"):
+                    self.assertTrue(any(expected in script for script in scripts), expected)
 
     def test_local_claude_subscription_auth(self):
         for method, expected in (("claude.ai", True), ("oauth_token", True), ("api_key", False)):

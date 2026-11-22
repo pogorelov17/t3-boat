@@ -14,32 +14,22 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from role_profile import OPTION, read_profile
+from role_profile import PROVIDERS, OPTION, read_profile
 
 
 def output(*args):
     return subprocess.check_output(args, text=True).strip()
 
 
-def bootstrap(role):
-    provider = role["provider"]
-    settings = {
-        "linkedEnvironmentsEnabled": True,
-        "defaultModelSelection": {
-            "instanceId": provider, "model": role["model"],
-            "options": [{"id": OPTION[provider], "value": role["effort"]}],
-        },
-        "providerInstances": {p: {"driver": p, "enabled": p == provider} for p in OPTION},
-    }
+def subscription_check(provider):
     if provider == "codex":
-        preflight = """
+        return """
 command -v codex >/dev/null
 codex login status 2>&1 | grep -Fqi 'logged in using chatgpt' || {
   echo 'Boat did not supply a ChatGPT subscription login' >&2; exit 1;
 }
 """
-    else:
-        preflight = """
+    return """
 if ! command -v claude >/dev/null 2>&1; then
   curl -fsSL https://claude.ai/install.sh -o "$HOME/t3-worker/claude-install.sh"
   bash "$HOME/t3-worker/claude-install.sh" 2.1.330 >&2
@@ -52,6 +42,18 @@ claude auth status 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.st
   echo 'Boat did not supply a Claude subscription token' >&2; exit 1;
 }
 """
+
+
+def bootstrap(role):
+    provider = role["provider"]
+    settings = {
+        "linkedEnvironmentsEnabled": True,
+        "defaultModelSelection": {
+            "instanceId": provider, "model": role["model"],
+            "options": [{"id": OPTION[provider], "value": role["effort"]}],
+        },
+        "providerInstances": {p: {"driver": p, "enabled": p == provider} for p in OPTION},
+    }
     return f"""
 set -eu
 umask 077
@@ -60,7 +62,7 @@ test ! -e "$HOME/.t3/userdata/settings.json"
 mkdir -p "$HOME/.t3/userdata" "$HOME/t3-worker"
 printf '%s\\n' {shlex.quote(json.dumps(settings))} > "$HOME/.t3/userdata/settings.json"
 cd "$HOME/t3-worker"
-{preflight}
+{subscription_check(provider)}
 npm install --prefix "$HOME/t3-worker-runtime" t3@0.1.11 >&2
 nohup "$HOME/t3-worker-runtime/node_modules/.bin/t3" --no-browser --host 127.0.0.1 --port 3773 --auto-bootstrap-project-from-cwd >"$HOME/t3-worker.log" 2>&1 </dev/null &
 """
@@ -153,6 +155,54 @@ def provision(name, environment):
     return vm
 
 
+def verify(environment, slug=None):
+    profile = os.environ["T3_BOAT_PROFILE"]
+    roles = read_profile(profile)
+    if slug and not re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", slug):
+        raise ValueError("Expected a GitHub owner/repository")
+    vm = provision("t3-check-" + uuid.uuid4().hex[:12], environment)
+    print(f"Checking access from Boat VM {vm}", flush=True)
+
+    def check(script, label):
+        command = "sh -ec " + shlex.quote(script)
+        try:
+            subprocess.run(["boat", "ssh", vm, command], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=True, timeout=300)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            raise RuntimeError(f"{label} failed on {vm}. Check Boat environment credentials and model access.") from None
+        print(f"[ok] {label}", flush=True)
+
+    try:
+        check("gh api 'installation/repositories?per_page=1' >/dev/null 2>&1 || gh api user >/dev/null",
+              "GitHub authentication")
+        if slug:
+            check("GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "
+                  + shlex.join(["ls-remote", "https://github.com/" + slug + ".git", "HEAD"]),
+                  f"Git read access to {slug}")
+        prompt = "Reply with exactly BOAT_OK. Do not use tools."
+        for provider in PROVIDERS[profile]:
+            role = next((r for r in (roles["executor"], *roles.values()) if r["provider"] == provider), None)
+            if provider == "codex":
+                args = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", "reply"]
+                if role:
+                    args.extend(["--model", role["model"], "-c", 'model_reasoning_effort=' + json.dumps(role["effort"])])
+                command = shlex.join([*args, prompt])
+            else:
+                args = ["claude", "-p", "--tools", "", "--output-format", "text"]
+                if role:
+                    args.extend(["--model", role["model"], "--effort", role["effort"]])
+                command = shlex.join([*args, prompt]) + " >reply"
+            script = ('export PATH="$HOME/.local/bin:$PATH"; umask 077; mkdir -p "$HOME/t3-worker"; '
+                      'cd "$(mktemp -d)"; ' + subscription_check(provider) + "\n" + command
+                      + "\ngrep -Fxq BOAT_OK reply")
+            label = role["model"] + " / " + role["effort"] if role else "CLI default"
+            check(script, f"{provider} subscription reply ({label})")
+    finally:
+        print(f"Deleting check VM {vm}", flush=True)
+        subprocess.run(["boat", "delete", "--yes", vm], check=True)
+        print(f"[ok] Deleted {vm}", flush=True)
+
+
 def start(role_name):
     profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
     roles = read_profile(profile)
@@ -176,9 +226,12 @@ def start(role_name):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] != "start":
-        sys.exit("usage: boat-worker start ROLE")
     try:
-        start(sys.argv[2])
+        if len(sys.argv) == 3 and sys.argv[1] == "start":
+            start(sys.argv[2])
+        elif len(sys.argv) in (3, 4) and sys.argv[1] == "verify":
+            verify(*sys.argv[2:])
+        else:
+            sys.exit("usage: boat-worker start ROLE | verify ENVIRONMENT [OWNER/REPO]")
     except (ValueError, OSError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
         sys.exit(f"Boat worker: {exc}")

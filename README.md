@@ -6,7 +6,7 @@ Open a T3 chat to work on an existing GitHub project or plan a new one. When you
 
 ## Quick start
 
-For your first chat, you need a Linux server with Docker Engine and SSH, and a subscription for the orchestrator in your chosen profile. Connect Boat and the worker subscriptions when you start coding. The image supports AMD64 and ARM64. [Install Docker Engine](https://docs.docker.com/engine/install/).
+You need a Linux server with Docker Engine and SSH, a Boat account that can start a small VM, a GitHub account, and the subscriptions enabled in your profile. A repository is optional. The image supports AMD64 and ARM64. [Install Docker Engine](https://docs.docker.com/engine/install/).
 
 ### 1. Start the container
 
@@ -17,21 +17,28 @@ docker run -d --name t3-boat --restart unless-stopped \
   -p 127.0.0.1:3773:3773 \
   -v t3-boat-data:/data \
   -e T3_BOAT_PROFILE=codex+claude \
-  pogorelov17/t3-boat:0.1.1
+  pogorelov17/t3-boat:0.1.2
 ```
 
-### 2. Sign in
+### 2. Connect your accounts and verify a worker
 
-On the server, run setup and sign in to the orchestrator. At **GitHub repository URL**, choose how you want to start:
-
-- **Work on an existing project.** Paste its GitHub URL, select a Boat environment and follow the prompts to connect the workers.
-- **Explore an idea first.** Press **Enter**. Setup creates a workspace called **Start here** for planning.
-
-If an AI agent handles setup, give it your repository URL or tell it to start with an idea. Complete the account login yourself.
+Run this on the server. The live check uses a small Boat VM and one short model request per enabled provider.
 
 ```sh
 docker exec -it t3-boat t3-boat setup
 ```
+
+| Profile | Sign in on the T3 server | Connect in the Boat credential profile |
+| --- | --- | --- |
+| `codex-only` | Codex with ChatGPT | ChatGPT subscription |
+| `claude-only` | Claude Code with Claude | Claude subscription |
+| `codex+claude` | Both | Both subscriptions |
+
+1. Follow the login prompts. Existing valid sessions are reused. At **GitHub repository URL**, enter a project URL or press **Enter** to open **Start here** with your own idea.
+2. Approve the Boat device login if prompted. In Boat, connect GitHub. Open **Agents & Proxying**, select your worker credential profile and connect the subscriptions in the table. Boat supplies these logins to new VMs. Select a private worker environment that passes GitHub and agent credentials and uses that credential profile. For a repository, grant the Boat GitHub App access to that repository with **Contents** and **Pull requests** write permissions. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
+3. Setup starts a fresh VM, authenticates to GitHub from it and requests one reply from each enabled provider. If you supplied a repository, it also reads its Git refs from that VM. Look for each success line, the deleted VM ID and **Setup verified**. If a check fails, fix the reported connection and rerun setup.
+
+**Installing with an AI agent?** Have the account owner complete browser confirmations directly. Report the profile, the local logins, the VM ID and deletion, the providers and models that replied, and the repository checked or deferred. Complete the first-chat check below. A running container alone is only the first step.
 
 ### 3. Open your first chat
 
@@ -56,15 +63,15 @@ Open the printed link on your computer and keep the SSH session open.
 
 </details>
 
-If you are unsure where to begin, ask the orchestrator for ideas. You can explore them in this chat before starting a Boat VM.
+If you are unsure where to begin, ask the orchestrator for ideas. Wait for a reply in the new chat to confirm your client can reach the orchestrator. Planning can continue there until you choose a repository.
 
 ## Build your first feature
 
 1. **Choose the repository for this change.** Use the URL of any GitHub repository you can work on. For a brand-new project, initializing the repository with a README gives the first PR a base commit.
-2. **Connect workers if needed.** If you already connected the repository during setup, continue to step 3. Otherwise, run `docker exec -it t3-boat t3-boat setup`, enter the repository URL, and select your Boat environment. Follow setup to connect the worker subscriptions and grant Boat permission to push branches and open PRs for this repository. Run `docker exec t3-boat t3-boat status` to check the binding. [Boat repositories](https://docs.boat.dev/environments/repositories) · [Worker credentials](https://docs.boat.dev/ai-credentials)
+2. **Attach the repository.** If you supplied its URL during setup, continue to step 3. Otherwise rerun `docker exec -it t3-boat t3-boat setup` and enter the URL. Setup checks access from a fresh VM. The first real change exercises branch push and draft PR creation.
 3. **Continue the conversation.** Use your project chat. If you began in **Start here**, attaching the first repository keeps your planning thread there. When you are ready, ask for the first change you want. The executor implements it on Boat, checks the result, and opens a draft PR. Two reviewers examine the same commit. You decide when to merge.
 
-To work on another repository, run setup again and enter its URL.
+To work on another repository, rerun setup with its URL. To inspect current local logins, Boat configuration and the timestamp of the last successful VM check, run `docker exec t3-boat t3-boat status`. Status does not allocate a VM. Rerun setup for a fresh check after changing profiles, credentials or models.
 
 ## Role profiles
 
@@ -97,7 +104,7 @@ Apply your edits, then open a new chat.
 ```sh
 docker exec -i t3-boat sh -ec 'p="$HOME/profiles/$T3_BOAT_PROFILE.json"; cat > "$p.new" && mv "$p.new" "$p"' < roles.json
 docker restart t3-boat
-docker exec t3-boat t3-boat status
+docker exec -it t3-boat t3-boat setup
 ```
 
 </details>
