@@ -1,0 +1,24 @@
+---
+name: t3-boat
+description: Run T3 project tasks on disposable Boat VMs, hand off through draft PRs and coordinate independent reviews.
+---
+
+# Boat project workflow
+
+The parent chat is the orchestrator / team lead. Answer ordinary questions locally. Use the user's language. Start this workflow only for repository inspection, tests, changes or research requested for a project.
+
+## Start and delegate
+
+1. Read the role table below. Check the current thread provider, model and effort against the orchestrator row. If a project override or an unavailable option changes the selection, tell the owner what to select before starting work. Never silently substitute. Use the table even if the task mentions no model.
+2. From the current project's empty Git stub, read the origin URL and the local `boat.environment` setting. If setup is incomplete, ask the owner to run `t3-boat setup`. Keep all repository files, dependencies, tests and builds on Boat.
+3. For each needed role, run `boat-worker start ROLE` from this stub. Record the returned VM and linked environment IDs. Check `orchestrator_capabilities` for the linked environment, selected provider, exact model and option. Use T3's native `delegate_task` with that environment, provider instance, model and options. If the option or model is missing, report it and release the VM. Require each child to confirm the model and option when visible. Distinguish the launch setting from anything independently echoed by the provider.
+4. Use the scout for code discovery with file/line evidence, and the researcher for external questions with primary source links and dates. Boat environments can pre-clone the project under the worker's home. Verify the checkout's origin against the requested repository, use that checkout if it matches, or clone on the VM if absent. For tests alone the executor checks out the requested revision, runs the tests and reports the commands, SHA and results. Read-only work needs no PR.
+5. Give the executor the Git URL, requirements, target branch and findings. It uses the verified VM checkout, creates a task branch, changes code, tests, commits, pushes and opens a **Draft PR** through the project's authorized GitHub integration. Verify base, head branch, PR URL, tests and exact head SHA. Never push to the target branch.
+6. Start reviewer1 and reviewer2 on separate fresh VMs. Give both the same requirements, base, PR URL and exact head SHA. Each independently checks out and verifies that SHA and reviews the entire change (requirements, architecture, correctness, edge cases, regressions, compatibility, security and test coverage). Require evidence, commands, test outcomes and one verdict, APPROVE or REQUEST_CHANGES. Keep their findings separate until both respond.
+7. If either requests changes, run a fresh executor on the same PR branch and repeat both reviews against the new SHA. Use the adjudicator for conflicting verdicts or two unsuccessful repair rounds. It cannot waive either approval. Verify the PR head has not moved. Report the final PR and both verdicts to the owner, who decides when to merge.
+
+## Parent history and cleanup
+
+For an Astra role configured at high effort, the pilot supports a reported escalation to xhigh for trading or money calculations, authentication, concurrency, migrations, infrastructure, compatibility, large cross-module refactors, conflicting reviews or repeated failure. Verify support first and announce the reason before launch. Keep explicitly customized settings for other roles and never choose max automatically.
+
+Post compact milestones in the parent chat with child links, provider/model/option, VM IDs, results, test commands, reviewed SHA, PR and verdicts. Copy each child's outcome (or failure) before unlinking the environment and deleting its VM. Run `t3 environment unlink ENVIRONMENT_ID` and `boat delete --yes VM_ID` using the exact IDs created for that role. Confirm deletion and report any pending cleanup, including failures and cancelled work. Never snapshot or reuse workers. Keep credentials, pairing codes, account information and private reasoning out of messages. On interruption, resume from recorded IDs and the current PR head.

@@ -1,0 +1,9 @@
+**
+!bin/
+!bin/*
+!policy/
+!policy/**
+!profiles/
+!profiles/*.json
+**/__pycache__/
+**/*.pyc

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Fetch Claude Code directly into this installation's volume. It is licensed
+# separately from the open-source components distributed in the Docker image.
+set -eu
+version=2.1.330
+prefix="$HOME/.local"
+if [ -x "$prefix/bin/claude" ] && [ "$("$prefix/bin/claude" --version | cut -d ' ' -f 1)" = "$version" ]; then
+  exit 0
+fi
+npm install --global --prefix "$prefix" --no-fund --no-audit "@anthropic-ai/claude-code@$version"
+"$prefix/bin/claude" --version

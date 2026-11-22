@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Provision and link one private Boat VM for one T3 child."""
+import json
+import os
+import re
+import shlex
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+from profile import OPTION, read_profile
+
+
+def output(*args):
+    return subprocess.check_output(args, text=True).strip()
+
+
+def bootstrap(role):
+    provider = role["provider"]
+    settings = {
+        "linkedEnvironmentsEnabled": True,
+        "defaultModelSelection": {
+            "instanceId": provider, "model": role["model"],
+            "options": [{"id": OPTION[provider], "value": role["effort"]}],
+        },
+        "providerInstances": {p: {"driver": p, "enabled": p == provider} for p in OPTION},
+    }
+    if provider == "codex":
+        preflight = """
+command -v codex >/dev/null
+codex login status 2>&1 | grep -Fqi 'logged in using chatgpt' || {
+  echo 'Boat did not supply a ChatGPT subscription login' >&2; exit 1;
+}
+"""
+    else:
+        preflight = """
+if ! command -v claude >/dev/null 2>&1; then
+  curl -fsSL https://claude.ai/install.sh -o "$HOME/t3-worker/claude-install.sh"
+  bash "$HOME/t3-worker/claude-install.sh" 2.1.330 >&2
+fi
+version=$(claude --version | awk '{print $1}')
+test -n "$version" && test "$(printf '%s\\n' 2.1.321 "$version" | sort -V | head -1)" = 2.1.321 || {
+  echo 'Boat Claude Code must be at least 2.1.321' >&2; exit 1;
+}
+claude auth status 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.stdin); sys.exit(0 if s.get("loggedIn") and s.get("apiProvider")=="firstParty" and s.get("authMethod")=="oauth_token" else 1)' || {
+  echo 'Boat did not supply a Claude subscription token' >&2; exit 1;
+}
+"""
+    return f"""
+set -eu
+umask 077
+export PATH="$HOME/.local/bin:$PATH"
+test ! -e "$HOME/.t3/userdata/settings.json"
+mkdir -p "$HOME/.t3/userdata" "$HOME/t3-worker"
+printf '%s\\n' {shlex.quote(json.dumps(settings))} > "$HOME/.t3/userdata/settings.json"
+cd "$HOME/t3-worker"
+{preflight}
+npm install --prefix "$HOME/t3-worker-runtime" t3@0.1.11 >&2
+nohup "$HOME/t3-worker-runtime/node_modules/.bin/t3" --no-browser --host 127.0.0.1 --port 3773 --auto-bootstrap-project-from-cwd >"$HOME/t3-worker.log" 2>&1 </dev/null &
+"""
+
+
+def link(vm, role):
+    def remote(command):
+        return output("boat", "ssh", vm, command)
+
+    remote("sh -c " + shlex.quote(bootstrap(role)))
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+    tunnel = subprocess.Popen(
+        ["boat", "forward", vm, "--bind", "127.0.0.1", "--remote", "3773", "--local", str(port)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        for _ in range(60):
+            if tunnel.poll() is not None:
+                raise RuntimeError("Boat tunnel exited")
+            try:
+                with urllib.request.urlopen(url, timeout=2):
+                    pass
+                break
+            except urllib.error.HTTPError:
+                break  # A running T3 can require authentication.
+            except OSError:
+                time.sleep(1)
+        else:
+            raise RuntimeError("T3 worker did not become ready")
+        environment = str(uuid.UUID(remote('cat "$HOME/.t3/userdata/environment-id"')))
+        cert = json.loads(remote('"$HOME/t3-worker-runtime/node_modules/.bin/t3" auth pairing create --ttl 2m --json'))
+        token = next((cert.get(k) for k in ("credential", "pairingCode", "code", "token", "pairingToken")
+                      if isinstance(cert.get(k), str)), None)
+        if not token or any(c.isspace() for c in token):
+            raise RuntimeError("Unrecognized pairing response (values withheld)")
+        subprocess.run(["t3", "environment", "link", "--from", "-", "--access", "auto"],
+                       input=f"{url} {token}\n", text=True, check=True, stdout=subprocess.DEVNULL)
+        print(f"Boat {vm} linked to T3 environment {environment}", flush=True)
+    except BaseException:
+        if tunnel.poll() is None:
+            tunnel.terminate()
+        raise
+
+
+def find_created_by_name(name):
+    # Only needed when creation returned without a usable ID (for example, a lost response).
+    for delay in (0, 1, 2, 4):
+        time.sleep(delay)
+        try:
+            machines = json.loads(output("boat", "list", "--json"))["sandboxes"]
+            ids = [v["id"] for v in machines if v.get("name") == name]
+        except (subprocess.CalledProcessError, OSError, ValueError, KeyError):
+            continue
+        if len(ids) == 1 and re.fullmatch(r"bx_[a-zA-Z0-9]+", ids[0]):
+            return ids[0]
+        if len(ids) > 1:
+            break
+    raise RuntimeError(f"Could not resolve the creation outcome. Check Boat for VM named {name}")
+
+
+def provision(name, environment):
+    try:
+        result = subprocess.run(
+            ["boat", "new", "--json", "--type", "small", "--ttl", "3600", "--no-snapshots",
+             "--name", name, "--environment", environment], stdout=subprocess.PIPE, text=True,
+        )
+    except KeyboardInterrupt:
+        vm = find_created_by_name(name)
+        subprocess.run(["boat", "delete", "--yes", vm], check=True)
+        raise
+    vm = None
+    for line in result.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("event") in ("created", "ready"):
+            identity = event.get("id")
+            if isinstance(identity, str) and re.fullmatch(r"bx_[a-zA-Z0-9]+", identity):
+                vm = identity
+    if vm is None:
+        vm = find_created_by_name(name)
+    if result.returncode:
+        subprocess.run(["boat", "delete", "--yes", vm], check=True)
+        raise RuntimeError(f"Boat creation failed; worker {vm} deleted")
+    return vm
+
+
+def start(role_name):
+    profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
+    roles = read_profile(profile)
+    if role_name == "orchestrator" or role_name not in roles:
+        raise ValueError("Select a child role from the active profile")
+    # Only provision from a configured project stub; nothing on the host fetches origin.
+    origin = output("git", "config", "--local", "--get", "remote.origin.url")
+    environment = output("git", "config", "--local", "--get", "boat.environment")
+    if not origin or not environment:
+        raise ValueError("Run t3-boat setup to bind the current project")
+    name = "t3-worker-" + uuid.uuid4().hex[:12]
+    print(f"Creating Boat worker {name} for {role_name}", flush=True)
+    vm = provision(name, environment)
+    print(f"Boat ID: {vm}", flush=True)
+    try:
+        link(vm, roles[role_name])
+    except BaseException:
+        subprocess.run(["boat", "delete", "--yes", vm], check=True)
+        raise
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3 or sys.argv[1] != "start":
+        sys.exit("usage: boat-worker start ROLE")
+    try:
+        start(sys.argv[2])
+    except (ValueError, OSError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
+        sys.exit(f"Boat worker: {exc}")

@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+FROM node:24-bookworm-slim
+
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git jq openssh-client python3 ripgrep tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upstream archives include the T3 runtime and web assets. Download them at
+# build time so a new volume also works when GitHub is temporarily unavailable.
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) arch=x64; t3_sha=2b691c07f5bcb5adea4a863d5324aae7db21bd6d82280cec7787836dcaa013e1; boat_sha=9f2fb5529ad7ca58e4d724bb6bfcd6ff94cb3077a7c12a0941e501aa0e9335ec ;; \
+      arm64) arch=arm64; t3_sha=7d90a5af032fe0988a616403e0f51a6cb68eff7ed7a84bc40999cc3997dffd71; boat_sha=38c250ea83237c4836367684fdfaf5f8e7de2cec15d50b4a6feae6adb863efa7 ;; \
+      *) echo 'Supported architectures: amd64, arm64' >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/t3-runtime /usr/share/doc/boat; \
+    curl -fsSL --retry 3 "https://github.com/pingdotgg/t3code/releases/download/v0.1.11/t3-0.1.11-linux-${arch}.tar.gz" -o /tmp/t3.tar.gz; \
+    echo "$t3_sha  /tmp/t3.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/t3.tar.gz -C /opt/t3-runtime --strip-components=1; \
+    rm /tmp/t3.tar.gz; \
+    ln -s /opt/t3-runtime/t3 /usr/local/bin/t3; \
+    curl -fsSL --retry 3 https://raw.githubusercontent.com/pingdotgg/t3code/v0.1.11/LICENSE -o /opt/t3-runtime/LICENSE; \
+    curl -fsSL --retry 3 "https://github.com/ariana-dot-dev/agent-server/releases/download/boat-cli-v1.0.105/boat-linux-${arch}" -o /usr/local/bin/boat; \
+    echo "$boat_sha  /usr/local/bin/boat" | sha256sum -c -; \
+    chmod 755 /usr/local/bin/boat; \
+    curl -fsSL --retry 3 https://raw.githubusercontent.com/ariana-dot-dev/agent-server/boat-cli-v1.0.105/LICENSE -o /usr/share/doc/boat/LICENSE; \
+    npm install --global --no-fund --no-audit @openai/codex@0.171.0; \
+    npm cache clean --force; \
+    t3 --version; codex --version; boat --help >/dev/null
+
+ENV HOME=/data \
+    PATH=/opt/t3-boat/bin:/data/.local/bin:${PATH} \
+    BOAT_NO_UPDATE=1 \
+    PYTHONDONTWRITEBYTECODE=1
+RUN install -d -m 700 -o node -g node /data \
+    && usermod --home /data node
+COPY bin/ /opt/t3-boat/bin/
+COPY profiles/ /opt/t3-boat/profiles/
+COPY policy/ /opt/t3-boat/policy/
+RUN chmod 755 /opt/t3-boat/bin/* \
+    && ln -s /opt/t3-boat/bin/boat-worker /usr/local/bin/boat-worker \
+    && ln -s /opt/t3-boat/bin/t3-boat /usr/local/bin/t3-boat \
+    && ln -s /data/.local/bin/claude /usr/local/bin/claude
+USER node:node
+WORKDIR /data
+VOLUME ["/data"]
+EXPOSE 3773
+ENTRYPOINT ["/usr/bin/tini", "--", "t3-boat"]
+CMD ["serve"]

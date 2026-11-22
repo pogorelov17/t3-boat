@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Run and provision the persistent T3 coordinator."""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+PROFILES = {
+    "codex-only": ("codex",),
+    "claude-only": ("claude",),
+    "codex+claude": ("codex", "claude"),
+}
+SUBSCRIPTIONS = {"codex": "chatgpt-subscription", "claude": "claude-subscription"}
+BOAT_ENV = "https://boat.dev/dashboard?tab=environment"
+BOAT_AI = "https://boat.dev/dashboard?tab=agents"
+LOCAL_URL = "http://127.0.0.1:3773"
+
+
+class SetupError(Exception):
+    pass
+
+
+def probe(*argv):
+    """Never echo raw metadata: Boat environments can include secret values."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=25)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 0:
+        return (result.stdout + result.stderr).strip()
+    return None
+
+
+def boat_records(command, key):
+    try:
+        result = subprocess.run(["boat", *command, "--json"], capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL, check=True, timeout=25)
+        rows = json.loads(result.stdout)[key]
+        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+            return rows
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        pass
+    raise SetupError(f"Cannot read Boat {key}. Check boat login, network and account permissions.")
+
+
+def logged_in(provider):
+    if provider == "codex":
+        return "logged in using chatgpt" in (probe("codex", "login", "status") or "").lower()
+    try:
+        auth = json.loads(probe("claude", "auth", "status") or "{}")
+        return (auth.get("loggedIn") is True and auth.get("apiProvider") == "firstParty"
+                and auth.get("authMethod") in ("claude.ai", "oauth_token"))
+    except (ValueError, AttributeError):
+        return False
+
+
+def run(*argv):
+    try:
+        subprocess.run(argv, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        raise SetupError(f"{argv[0]} command failed. Fix the reported issue and rerun setup.") from None
+
+
+def repo_slug(value):
+    pattern = r"(?:https://github\.com/|git@github\.com:)([a-z0-9][a-z0-9-]*)/([a-z0-9_.-]+?)(?:\.git)?/?"
+    match = re.fullmatch(pattern, value, re.IGNORECASE | re.ASCII)
+    if not match or match[2].lower() in (".", "..", ".git"):
+        raise SetupError("Enter a GitHub repository URL without credentials, query parameters or a branch.")
+    return "/".join(match.groups())
+
+
+def t3_online():
+    try:
+        with urllib.request.urlopen(LOCAL_URL + "/.well-known/t3/environment", timeout=3) as response:
+            return bool(json.load(response).get("environmentId"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def env_for(environments, label):
+    matches = [env for env in environments if label in (env.get("name"), env.get("id"))]
+    if len(matches) != 1:
+        raise SetupError(f"Choose one accessible Boat environment at {BOAT_ENV}.")
+    return matches[0]
+
+
+def check_access(env, profiles, providers):
+    if (env.get("safeForThirdParties") is not False or env.get("passGithub") is not True
+            or env.get("passAgentsCredentials") is not True):
+        raise SetupError(f"Choose an environment for your private workers with GitHub and agent credentials enabled at {BOAT_ENV}.")
+    selected = env.get("credentialProfileId")
+    if selected:
+        matches = [p for p in profiles if selected in (p.get("id"), p.get("name"))]
+    else:
+        matches = [p for p in profiles if p.get("isDefault") is True]
+    if len(matches) != 1:
+        raise SetupError(f"Set an explicit, accessible AI credential profile on this environment at {BOAT_ENV}.")
+    missing = [SUBSCRIPTIONS[p] for p in providers if SUBSCRIPTIONS[p] not in matches[0].get("connected", [])]
+    if missing:
+        raise SetupError(f"Connect {', '.join(missing)} in the environment's AI profile at {BOAT_AI}.")
+
+
+def has_repo(env, slug):
+    return any(str(r.get("fullName", "")).lower() == slug.lower()
+               for r in env.get("selectedRepositories", []) if isinstance(r, dict))
+
+
+def projects():
+    return sorted((Path.home() / "projects").glob("*/*/.git"))
+
+
+def register(slug, label):
+    workspace = Path.home() / "projects" / slug
+    origin = "https://github.com/" + slug + ".git"
+    if workspace.exists():
+        current = probe("git", "-C", str(workspace), "config", "--local", "--get", "remote.origin.url")
+        if not (workspace / ".git").is_dir() or current and current.lower() != origin.lower():
+            raise SetupError(f"Existing directory {workspace} belongs to another project.")
+    workspace.mkdir(parents=True, exist_ok=True)
+    git = ["git", "-C", str(workspace)]
+    run(*git, "init", "--quiet")
+    run(*git, "config", "--local", "protocol.allow", "never")
+    run(*git, "config", "--local", "remote.origin.url", origin)
+    run(*git, "config", "--local", "boat.environment", label)
+    result = subprocess.run(["t3", "project", "add", "--title", slug.rsplit("/", 1)[1], str(workspace)],
+                            capture_output=True, text=True)
+    if result.returncode and "An active project already exists for" not in result.stdout + result.stderr:
+        raise SetupError("T3 could not register the workspace. Check that the server is running and retry setup.")
+    print(f"Registered {slug} in T3 at {workspace}.")
+
+
+def parent_role(profile):
+    path = Path.home() / "profiles" / (profile + ".json")
+    try:
+        return json.loads(path.read_text())["orchestrator"]
+    except (OSError, KeyError, TypeError, ValueError):
+        raise SetupError("The global role profile could not be read. Check docker logs t3-boat.") from None
+
+
+def setup(profile, providers):
+    if not t3_online():
+        raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
+    if probe("boat", "status", "--check") is None:
+        run("boat", "onboard", "--wait")
+        if probe("boat", "status", "--check") is None:
+            raise SetupError("Boat login is incomplete. Rerun setup after approving the device.")
+    if "claude" in providers:
+        run("install-claude")
+    provider = {"claudeAgent": "claude", "codex": "codex"}[parent_role(profile)["provider"]]
+    if not logged_in(provider):
+        if provider == "codex":
+            run("codex", "login", "--device-auth")
+        else:
+            run("claude", "auth", "login")
+        if not logged_in(provider):
+            raise SetupError(f"A {provider} subscription login is required. Rerun setup to resume.")
+    print("In Boat, connect the GitHub App for your repository with Contents and Pull requests write access.")
+    print(f"GitHub and environment: {BOAT_ENV}\nWorker subscriptions: {BOAT_AI}")
+    existing = projects()
+    optional = " (Enter to resume existing projects)" if existing else ""
+    url = input(f"GitHub repository URL{optional}: ").strip()
+    envs = boat_records(["env", "list"], "environments")
+    if url or not existing:
+        slug = repo_slug(url)
+        print("Boat environments:", ", ".join(e["name"] for e in envs))
+        env = env_for(envs, input("Boat environment name or ID: ").strip())
+        selected = [(slug, env["name"])]
+    else:
+        selected = []
+        for git_dir in existing:
+            git = ["git", "-C", str(git_dir.parent), "config", "--local", "--get"]
+            slug = repo_slug(probe(*git, "remote.origin.url") or "")
+            selected.append((slug, probe(*git, "boat.environment")))
+    profiles = boat_records(["ai", "profiles"], "profiles")
+    for slug, label in selected:
+        env = env_for(envs, label)
+        register(slug, env["name"])
+        check_access(env, profiles, providers)
+        if not has_repo(env, slug):
+            if input(f"Attach {slug} to Boat environment {env['name']}? [y/N] ").strip().lower() != "y":
+                raise SetupError("Project setup paused. Rerun setup once the repository is attached.")
+            run("boat", "env", "add-repo", env["name"], slug)
+            envs = boat_records(["env", "list"], "environments")
+            if not has_repo(env_for(envs, env["id"]), slug):
+                raise SetupError("Repository attachment is still unconfirmed. Check Boat and rerun setup.")
+    print("For a fresh pairing link through your SSH tunnel, run on the VPS:")
+    print("docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url " + LOCAL_URL)
+
+
+def status(profile, providers):
+    failures = []
+
+    def report(label, ready):
+        print(f"[{'ok' if ready else 'missing'}] {label}")
+        if not ready:
+            failures.append(label)
+
+    report("T3 HTTP server", t3_online())
+    try:
+        t3_home = Path(os.environ.get("T3CODE_HOME") or Path.home() / ".t3")
+        settings = json.loads((t3_home / "userdata/settings.json").read_text())
+        selection = settings.get("defaultModelSelection", {})
+        orchestrator = parent_role(profile)
+        expected = {("claudeAgent" if p == "claude" else p) for p in providers}
+        instances = settings.get("providerInstances", {})
+        option = "effort" if orchestrator["provider"] == "claudeAgent" else "reasoningEffort"
+        active = (selection.get("instanceId") == orchestrator["provider"]
+                  and selection.get("model") == orchestrator["model"]
+                  and {"id": option, "value": orchestrator["effort"]} in selection.get("options", [])
+                  and all(instances.get(p, {}).get("enabled") is (p in expected) for p in ("codex", "claudeAgent"))
+                  and settings.get("linkedEnvironmentsEnabled") is True)
+    except (OSError, ValueError, KeyError, TypeError, SetupError):
+        active = False
+    report(f"Global profile {profile} applied", active)
+    if active:
+        provider = {"codex": "codex", "claudeAgent": "claude"}[orchestrator["provider"]]
+        report(f"Local {provider} orchestrator subscription login", logged_in(provider))
+    boat = probe("boat", "status", "--check") is not None
+    report("Boat account", boat)
+    registered = projects()
+    report("Project workspace configured", bool(registered))
+    if boat and registered:
+        envs = boat_records(["env", "list"], "environments")
+        profiles = boat_records(["ai", "profiles"], "profiles")
+        for git_dir in registered:
+            workspace = git_dir.parent
+            git = ["git", "-C", str(workspace), "config", "--local", "--get"]
+            slug = repo_slug(probe(*git, "remote.origin.url") or "")
+            try:
+                env = env_for(envs, probe(*git, "boat.environment"))
+                check_access(env, profiles, providers)
+                report(f"{slug}: {env['name']}, subscriptions and repository attached",
+                       has_repo(env, slug) and probe("t3", "thread", "list", "--project", str(workspace), "--json") is not None)
+            except SetupError as error:
+                report(f"{slug}: {error}", False)
+    if failures:
+        print("Next: docker exec -it t3-boat t3-boat setup")
+        return 1
+    print("Configuration verified. Worker authentication, model access and PR permissions are checked during real work.")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("serve", "setup", "status"))
+    args = parser.parse_args()
+    profile = os.environ.get("T3_BOAT_PROFILE", "")
+    if profile not in PROFILES:
+        parser.error("set T3_BOAT_PROFILE to " + ", ".join(PROFILES))
+    if args.command == "serve":
+        subprocess.run([sys.executable, str(Path(__file__).with_name("profile.py")), profile], check=True)
+        os.chdir(Path.home())
+        os.execvp("t3", ["t3", "--no-browser", "--host", "0.0.0.0", "--port", "3773"])
+    if args.command == "setup":
+        setup(profile, PROFILES[profile])
+    return status(profile, PROFILES[profile])
+
+
+if __name__ == "__main__":
+    os.umask(0o077)
+    try:
+        sys.exit(main())
+    except (SetupError, EOFError, OSError, KeyboardInterrupt) as error:
+        sys.exit(f"{error or 'Setup interrupted.'}\nNext: docker exec -it t3-boat t3-boat setup")
