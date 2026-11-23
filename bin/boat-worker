@@ -166,7 +166,7 @@ def verify(environment, slug=None):
     def check(script, label):
         command = "sh -ec " + shlex.quote(script)
         try:
-            subprocess.run(["boat", "ssh", vm, command], stdout=subprocess.DEVNULL,
+            subprocess.run(["boat", "ssh", vm, command], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, check=True, timeout=300)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             raise RuntimeError(f"{label} failed on {vm}. Check Boat environment credentials and model access.") from None

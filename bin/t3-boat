@@ -247,7 +247,7 @@ def setup(profile, providers):
                 raise SetupError("Repository attachment is still unconfirmed. Check Boat and rerun setup.")
             credential = check_access(env, profiles, providers)
         print("Starting a disposable small Boat VM for a live subscription and GitHub check.", flush=True)
-        run("boat-worker", "verify", env["id"], *([slug] if slug else []))
+        run("boat-worker", "verify", env["name"], *([slug] if slug else []))
         if slug:
             register(slug, env["name"])
         else:

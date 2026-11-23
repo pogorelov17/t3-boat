@@ -68,7 +68,9 @@ In that SSH session, get a pairing link:
 docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url http://127.0.0.1:3773
 ```
 
-Open the printed link on your computer and keep the SSH session open.
+Open the printed link on your computer and keep the SSH session open while using T3. Closing that session or putting the computer to sleep interrupts this route. The container and chat history stay on the server. Run the SSH command again to reconnect to the same installation.
+
+After a server rebuild, verify the new SSH host key fingerprint in your hosting console before updating the saved key on your computer. If the installation also has a fresh data volume, pair the client to its new T3 environment.
 
 </details>
 

@@ -46,7 +46,7 @@ case "$1 $2" in
   'status --check') exit 0 ;;
   'env list') echo '{"environments":[{"id":"env1","name":"test","safeForThirdParties":false,"passGithub":true,"passAgentsCredentials":true}]}' ;;
   'ai profiles') echo '{"profiles":[{"id":"creds","isDefault":true,"connected":["chatgpt-subscription","claude-subscription"]}]}' ;;
-  'new --json') touch "$HOME/check-vm"; echo '{"event":"ready","id":"bx_check"}' ;;
+  'new --json') [ "${10}" = "--environment" ] && [ "${11}" = test ] || exit 1; touch "$HOME/check-vm"; echo '{"event":"ready","id":"bx_check"}' ;;
   'ssh bx_check') sh -ec "$3" ;;
   'delete --yes') test "$3" = bx_check && rm "$HOME/check-vm" ;;
   *) exit 1 ;;

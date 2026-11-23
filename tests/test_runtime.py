@@ -81,7 +81,7 @@ class RuntimeTests(unittest.TestCase):
             workspace = Path(self.home.name, "start-here")
             add.assert_called_once_with(workspace, "Start here")
             self.assertEqual(cli.status(profile, cli.PROFILES[profile]), 0)
-            self.assertIn(("boat-worker", "verify", "abc"), [c.args for c in run.call_args_list])
+            self.assertIn(("boat-worker", "verify", "base"), [c.args for c in run.call_args_list])
             self.assertIn("Repository access deferred", out.getvalue())
         with patch.object(cli, "add_workspace") as add, redirect_stdout(StringIO()):
             cli.register("owner/first", "base")
@@ -135,7 +135,7 @@ class RuntimeTests(unittest.TestCase):
         register.assert_called_once_with("owner/example", "base")
         self.assertEqual([call.args for call in run.call_args_list], [
             ("install-claude",), ("boat", "env", "add-repo", "base", "owner/example"),
-            ("boat-worker", "verify", "abc", "owner/example")])
+            ("boat-worker", "verify", "base", "owner/example")])
 
     def test_failed_model_reply_or_cleanup_fails_worker_check(self):
         for failure in ("reply", "delete"):
@@ -144,6 +144,8 @@ class RuntimeTests(unittest.TestCase):
 
                 def remote(argv, **kwargs):
                     calls.append(argv)
+                    if argv[1] == "ssh":
+                        self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
                     if ((failure == "reply" and argv[1] == "ssh" and "claude -p" in argv[-1])
                             or (failure == "delete" and argv[1] == "delete")):
                         raise subprocess.CalledProcessError(1, argv)
