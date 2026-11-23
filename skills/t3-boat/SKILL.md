@@ -19,7 +19,9 @@ The parent chat is the orchestrator / team lead. Discuss ideas, requirements and
 
 ## Parent history and cleanup
 
-Record the actual model ID for every executor, including repair rounds, in the parent chat. Before delegating a review or adjudication, resolve the selected model against worker capabilities and compare its identity with every model that authored changes on this PR. If the identity is uncertain or matches an author, stop and request a different review model. Apply this check again if a provider reports a different model during the run. Discard any self-review verdict. Keep both reviewers read-only.
+Record the actual model ID for every executor, including repair rounds, in the parent chat. Before delegating a review or adjudication, resolve the selected model against worker capabilities and compare its identity with every model that authored changes on this PR. The first reviewer and adjudicator always need a model distinct from every author. In the `codex-only` profile, the second reviewer may share the executor's exact Codex Sol model ID at the same or a different effort. Start that reviewer on its own fresh VM and give it the PR and requirements for an independent, read-only review. In every other case the second reviewer also needs a model distinct from every author.
+
+If a model identity is uncertain or violates these rules, stop and request a different model. Check again if a provider reports a different model during the run and discard a verdict that violates these rules. Keep both reviewers read-only.
 
 For an Astra role configured at high effort, the pilot supports a reported escalation to xhigh for trading or money calculations, authentication, concurrency, migrations, infrastructure, compatibility, large cross-module refactors, conflicting reviews or repeated failure. Verify support first and announce the reason before launch. Keep explicitly customized settings for other roles and never choose max automatically.
 

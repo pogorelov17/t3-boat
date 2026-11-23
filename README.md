@@ -2,7 +2,7 @@
 
 Use a small Linux server to coordinate coding agents across your GitHub projects. Bring an idea or an existing repository, then work from a T3 chat using Codex, Claude, or both.
 
-[Quick start](#quick-start) · [Role profiles](#role-profiles) · [Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases)
+[Quick start](#quick-start) · [Default role profiles](#default-role-profiles) · [Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases)
 
 ## How it works
 
@@ -10,7 +10,7 @@ Suppose you ask in T3, “Fix the failing test and show me why it broke.”
 
 1. **T3 coordinates the work.** The orchestrator uses your installation’s role profile to select the executor and reviewers. New chats across your projects inherit those model and reasoning settings. If you are still discussing an idea, the conversation can stay in T3 until you have a task for a worker.
 2. **Boat runs the code.** The executor checks out the repository on a disposable VM, reproduces the failure, tests the fix and opens a draft PR. Dependencies, builds and test runs stay on Boat, so your server only needs to host T3 and its history.
-3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit. Both send independent verdicts to the orchestrator. A model that wrote the change cannot review it. If a fix is needed, a fresh executor updates the same PR and both reviewers check the new commit.
+3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit. Both send independent verdicts to the orchestrator. The first reviewer always uses a different model from the executor. If a fix is needed, a fresh executor updates the same PR and both reviewers check the new commit.
 4. **You decide when to merge.** The parent chat collects links to the agents, the test results, both verdicts and the PR. Once a worker’s result is recorded, its VM can be deleted. You can return to the chat or request another change on the PR without keeping workers running.
 
 ## Quick start
@@ -26,7 +26,7 @@ docker run -d --name t3-boat --restart unless-stopped \
   -p 127.0.0.1:3773:3773 \
   -v t3-boat-data:/data \
   -e T3_BOAT_PROFILE=codex+claude \
-  pogorelov17/t3-boat:0.1.3
+  pogorelov17/t3-boat:0.1.4
 ```
 
 ### 2. Connect your accounts and verify a worker
@@ -43,7 +43,7 @@ docker exec -it t3-boat t3-boat setup
 | `claude-only` | Claude Code with Claude | Claude subscription |
 | `codex+claude` | Both | Both subscriptions |
 
-1. Follow the login prompts. Existing valid sessions are reused. At **GitHub repository URL**, enter a project URL or press **Enter** to open **Start here** with your own idea.
+1. Follow the login prompts. Existing valid sessions are reused. After sign-in, setup shows the model and reasoning level for each role. Press **Enter** to accept the table or select a role to customize it. At **GitHub repository URL**, enter a project URL or press **Enter** to open **Start here** with your own idea.
 2. Approve the Boat device login if prompted. In Boat, connect GitHub. Open **Agents & Proxying**, select your worker credential profile and connect the subscriptions in the table. Boat supplies these logins to new VMs. Select a private worker environment that passes GitHub and agent credentials and uses that credential profile. For a repository, grant the Boat GitHub App access to that repository with **Contents** and **Pull requests** write permissions. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
 3. Setup starts a fresh VM, authenticates to GitHub from it and requests one reply from each enabled provider. If you supplied a repository, it also reads its Git refs from that VM. Look for each success line, the deleted VM ID and **Setup verified**. If a check fails, fix the reported connection and rerun setup.
 
@@ -82,41 +82,23 @@ If you are unsure where to begin, ask the orchestrator for ideas. Wait for a rep
 
 To work on another repository, rerun setup with its URL. To inspect current local logins, Boat configuration and the timestamp of the last successful VM check, run `docker exec t3-boat t3-boat status`. Status does not allocate a VM. Rerun setup for a fresh check after changing profiles, credentials or models.
 
-## Role profiles
+## Default role profiles
 
-The profile applies to new chats across all projects on this server. Each entry shows the model and its default reasoning effort.
+Each entry is a suggested model family and reasoning level. On first setup, the installer selects the newest stable version of that family listed by T3 that supports the requested effort. You see the exact model IDs before accepting. Your choices apply to new chats across all projects on this server.
 
 | Role | Codex only | Claude only | Codex + Claude |
 | --- | --- | --- | --- |
-| Orchestrator | Astra 6.2 · high | Opus 5.5 · high | Astra 6.2 · high |
-| Code scout | Luna 6 · low | Haiku 5.5 · medium | Haiku 5.5 · medium |
-| Internet researcher | Sol 6.2 · high | Opus 5.5 · high | Sol 6.2 · high |
-| **Executor** | **Sol 5.6 · medium** | **Opus 5.5 · high** | **Opus 5.5 · high** |
-| Reviewer 1 | Astra 6.2 · high | Fable 5.2 · high | Fable 5.2 · high |
-| Reviewer 2 | Sol 6.2 · high | Sonnet 5.5 · high | Astra 6.2 · high |
-| Disputed reviews | Astra 6.2 · xhigh | Fable 5.2 · high | Astra 6.2 · xhigh |
+| Orchestrator | Astra · high | Opus · high | Astra · high |
+| Code scout | Luna · low | Haiku · medium | Haiku · medium |
+| Internet researcher | Sol · high | Opus · high | Sol · high |
+| **Executor** | **Sol · medium** | **Opus · high** | **Opus · high** |
+| Reviewer 1 | Astra · high | Fable · high | Fable · high |
+| Reviewer 2 | Sol · high | Sonnet · high | Astra · high |
+| Disputed reviews | Astra · xhigh | Fable · high | Astra · xhigh |
 
-The executor's model must differ from both reviewers and the model that settles disputes. The orchestrator checks model availability before delegation. [Codex profile](profiles/codex-only.json) · [Claude profile](profiles/claude-only.json) · [Combined profile](profiles/codex+claude.json).
+The first reviewer and the adjudicator use a different model from the executor. In **Codex only**, the default executor and second reviewer share the newest Sol that supports both effort levels. The second reviewer starts a separate read-only session on a fresh VM and reviews the same commit as the first reviewer. [Codex defaults](profiles/codex-only.json) · [Claude defaults](profiles/claude-only.json) · [Combined defaults](profiles/codex+claude.json).
 
-<details>
-<summary><strong>Customize models and reasoning</strong></summary>
-
-The editable profile lives in the Docker volume. In this example, change `PROFILE` to match the running container, copy the role table out, and edit the model IDs or effort levels in `roles.json`.
-
-```sh
-PROFILE=codex+claude
-docker cp "t3-boat:/data/profiles/$PROFILE.json" ./roles.json
-```
-
-Apply your edits, then open a new chat.
-
-```sh
-docker exec -i t3-boat sh -ec 'p="$HOME/profiles/$T3_BOAT_PROFILE.json"; cat > "$p.new" && mv "$p.new" "$p"' < roles.json
-docker restart t3-boat
-docker exec -it t3-boat t3-boat setup
-```
-
-</details>
+**Change your choices later.** Run `docker exec -it t3-boat t3-boat setup` again. Setup keeps your saved versions unless you edit a role or explicitly refresh the defaults. If a model or reasoning level is unavailable, choose a replacement before continuing.
 
 <details>
 <summary><strong>Keep your history when updating</strong></summary>

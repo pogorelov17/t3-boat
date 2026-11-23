@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 
+from profile_fixtures import seeded_roles
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -20,6 +22,13 @@ class RoleTests(unittest.TestCase):
         return subprocess.run([sys.executable, str(ROOT / "lib/role_profile.py"), profile], env=self.env,
                               capture_output=True, text=True, check=check)
 
+    def test_fresh_volume_waits_for_setup_before_selecting_a_model(self):
+        self.prepare("codex-only")
+        settings = json.loads((self.home / ".t3/userdata/settings.json").read_text())
+        self.assertTrue(settings["providerInstances"]["codex"]["enabled"])
+        self.assertNotIn("defaultModelSelection", settings)
+        self.assertFalse((self.home / "profiles/codex-only.json").exists())
+
     def test_all_profiles_switch_idempotently_and_preserve_user_settings(self):
         settings = self.home / ".t3/userdata/settings.json"
         settings.parent.mkdir(parents=True)
@@ -29,6 +38,7 @@ class RoleTests(unittest.TestCase):
         instructions.write_text("Personal instructions\n")
         for name in ("codex-only", "codex+claude", "claude-only"):
             with self.subTest(name=name):
+                seeded_roles(self.home, name)
                 self.prepare(name)
                 snapshot = {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file()}
                 self.prepare(name)
@@ -56,24 +66,51 @@ class RoleTests(unittest.TestCase):
                         for role, row in roles.items():
                             self.assertIn(f"| {role} | {row['provider']} | {row['model']} |", installed)
 
-    def test_executor_cannot_review_even_with_a_different_effort(self):
-        self.prepare("codex-only")
+    def test_codex_only_second_reviewer_can_share_the_executor_sol_at_any_effort(self):
         path = self.home / "profiles/codex-only.json"
-        rows = json.loads(path.read_text())
-        for role in ("reviewer1", "reviewer2", "adjudicator"):
-            with self.subTest(role=role):
-                edited = dict(rows)
-                edited[role] = dict(rows["executor"], effort="low")
-                path.write_text(json.dumps(edited))
+        path.parent.mkdir(exist_ok=True)
+        rows = seeded_roles(self.home, "codex-only")
+        for model, effort in [
+            ("gpt-6.2-sol", "medium"),
+            ("gpt-6.2-sol", "high"),
+            ("gpt-6.2-sol-2026-10-15", "high"),
+            ("gpt-6.2-sol-20261015", "high"),
+        ]:
+            with self.subTest(model=model, effort=effort):
+                rows["executor"].update(model=model, effort="medium")
+                rows["reviewer2"] = dict(rows["executor"], effort=effort)
+                path.write_text(json.dumps(rows))
                 result = self.prepare("codex-only", check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(path.read_text()), rows)
+
+    def test_other_reviews_require_a_different_author_model(self):
+        for profile, model, role in [
+            ("codex-only", "gpt-6.2-sol", "reviewer1"),
+            ("codex-only", "gpt-6.2-sol", "adjudicator"),
+            ("codex-only", "gpt-6.2-astra", "reviewer2"),
+            ("codex+claude", "gpt-6.2-sol", "reviewer2"),
+            ("claude-only", "claude-opus-5-5", "reviewer2"),
+        ]:
+            with self.subTest(profile=profile, model=model, role=role):
+                path = self.home / "profiles" / (profile + ".json")
+                path.parent.mkdir(exist_ok=True)
+                rows = seeded_roles(self.home, profile)
+                provider = "claudeAgent" if profile == "claude-only" else "codex"
+                rows["executor"] = dict(provider=provider, model=model, effort="medium")
+                for other in ("reviewer1", "reviewer2", "adjudicator"):
+                    rows[other]["model"] = "another-model"
+                rows[role] = dict(rows["executor"], effort="low")
+                path.write_text(json.dumps(rows))
+                result = self.prepare(profile, check=False)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(role, result.stderr)
-                self.assertEqual(json.loads(path.read_text()), edited)
+                self.assertEqual(json.loads(path.read_text()), rows)
 
     def test_stock_claude_volume_upgrades_to_independent_review(self):
         path = self.home / "profiles/claude-only.json"
         path.parent.mkdir()
-        old = json.loads((ROOT / "profiles/claude-only.json").read_text())
+        old = seeded_roles(self.home, "claude-only")
         for role in ("reviewer2", "adjudicator"):
             old[role] = dict(old["executor"])
         path.write_text(json.dumps(old, indent=2) + "\n")
@@ -83,6 +120,7 @@ class RoleTests(unittest.TestCase):
             self.assertNotEqual(upgraded[role]["model"], upgraded["executor"]["model"])
 
     def test_profile_edits_take_effect_and_invalid_provider_fails_before_changes(self):
+        seeded_roles(self.home, "claude-only")
         self.prepare("claude-only")
         path = self.home / "profiles/claude-only.json"
         rows = json.loads(path.read_text())
@@ -126,6 +164,7 @@ elif a[0] != 'delete': sys.exit(10)
             ("codex+claude", "executor", "claude auth status", "codex login status"),
         ]:
             with self.subTest(profile=name):
+                seeded_roles(self.home, name)
                 calls = self.home / "calls"
                 calls.unlink(missing_ok=True)
                 env = self.env | {"PATH": str(self.home) + ":" + self.env["PATH"], "T3_BOAT_PROFILE": name}

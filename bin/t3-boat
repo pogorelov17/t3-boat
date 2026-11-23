@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from role_profile import read_profile, write
+from role_picker import configure_roles
 
 PROFILES = {
     "codex-only": ("codex",),
@@ -208,6 +209,7 @@ def setup(profile, providers):
                 run("claude", "auth", "login")
             if not logged_in(provider):
                 raise SetupError(f"A {provider} subscription login is required. Rerun setup to resume.")
+    configure_roles(profile)
     existing = projects()
     optional = " (Enter to resume existing projects)" if existing else " (Enter to start with an idea)"
     url = input(f"GitHub repository URL{optional}: ").strip()
@@ -342,5 +344,5 @@ if __name__ == "__main__":
     os.umask(0o077)
     try:
         sys.exit(main())
-    except (SetupError, EOFError, OSError, KeyboardInterrupt) as error:
+    except (SetupError, ValueError, EOFError, OSError, KeyboardInterrupt) as error:
         sys.exit(f"{error or 'Setup interrupted.'}\nNext: docker exec -it t3-boat t3-boat setup")
