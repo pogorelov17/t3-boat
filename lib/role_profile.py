@@ -16,6 +16,7 @@ PROVIDERS = {
 }
 REQUIRED = ("orchestrator", "executor", "reviewer1", "reviewer2", "scout", "researcher", "adjudicator")
 OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
+CODEX_SOL = re.compile(r"gpt-[0-9]+(?:\.[0-9]+)*-sol(?:-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?")
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
 
@@ -33,27 +34,45 @@ def write(target, content):
         Path(temporary.name).unlink(missing_ok=True)
 
 
-def read_profile(name):
+def check_profile_name(name):
     if name not in PROVIDERS:
         raise ValueError("T3_BOAT_PROFILE must be one of: " + ", ".join(PROVIDERS))
-    target = Path.home() / "profiles" / (name + ".json")
-    source = target if target.exists() else ROOT / "profiles" / target.name
-    rows = json.loads(source.read_text())
+
+
+def validate_profile(name, rows):
+    check_profile_name(name)
     if not isinstance(rows, dict) or not set(REQUIRED).issubset(rows):
-        raise ValueError(f"{source}: expected roles " + ", ".join(REQUIRED))
+        raise ValueError("expected roles " + ", ".join(REQUIRED))
     for role, row in rows.items():
-        if not re.fullmatch(r"[a-z][a-z0-9_-]*", role) or not isinstance(row, dict):
-            raise ValueError(f"{source}: invalid role {role!r}")
+        if not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", role) or not isinstance(row, dict):
+            raise ValueError(f"invalid role {role!r}")
         if row.get("provider") not in PROVIDERS[name]:
-            raise ValueError(f"{source}: invalid provider for {role}")
+            raise ValueError(f"invalid provider for {role}")
         for key in ("model", "effort"):
             if not isinstance(row.get(key), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:_/-]*", row[key]):
-                raise ValueError(f"{source}: invalid {key} for {role}")
-    author = rows["executor"]["model"].rsplit("/", 1)[-1].casefold()
+                raise ValueError(f"invalid {key} for {role}")
+    executor_model = rows["executor"]["model"]
+    author = executor_model.rsplit("/", 1)[-1].casefold()
     for role in ("reviewer1", "reviewer2", "adjudicator"):
-        if rows[role]["model"].rsplit("/", 1)[-1].casefold() == author:
-            raise ValueError(f"{source}: select a different model for {role}; {author} writes the code")
+        model = rows[role]["model"]
+        if (name == "codex-only" and role == "reviewer2" and model == executor_model
+                and CODEX_SOL.fullmatch(model)):
+            continue
+        if model.rsplit("/", 1)[-1].casefold() == author:
+            raise ValueError(f"select a different model for {role}; {author} writes the code")
     return rows
+
+
+def read_profile(name):
+    check_profile_name(name)
+    target = Path.home() / "profiles" / (name + ".json")
+    if not target.is_file():
+        raise ValueError("Select role models with t3-boat setup first")
+    source = target
+    try:
+        return validate_profile(name, json.loads(source.read_text()))
+    except ValueError as exc:
+        raise ValueError(f"{source}: {exc}") from exc
 
 
 def instructions(path, content):
@@ -70,23 +89,33 @@ def instructions(path, content):
     return previous + ("\n\n" if previous else "") + block + "\n"
 
 
-def prepare(name):
-    # Only migrate the exact stock file installed by 0.1.0. Keep user edits.
-    if name == "claude-only":
-        saved = Path.home() / "profiles/claude-only.json"
-        old_digest = "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"
-        if saved.is_file() and hashlib.sha256(saved.read_bytes()).hexdigest() == old_digest:
-            write(saved, (ROOT / "profiles/claude-only.json").read_text())
-    roles = read_profile(name)
-    enabled = PROVIDERS[name]
+def prepare(name, rows=None):
+    check_profile_name(name)
     home = Path.home()
+    role_path = home / "profiles" / (name + ".json")
+    save_selection = rows is not None
+    if rows is None and role_path.is_file():
+        # Preserve the 0.1.0 migration for its exact stock table.
+        if name == "claude-only" and hashlib.sha256(role_path.read_bytes()).hexdigest() == (
+                "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"):
+            rows = json.loads(role_path.read_text())
+            rows["reviewer2"]["model"] = "claude-sonnet-5-5"
+            rows["adjudicator"]["model"] = rows["reviewer1"]["model"]
+            save_selection = True
+        else:
+            rows = read_profile(name)
+    enabled = PROVIDERS[name]
     settings_path = Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
     settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
-    parent = roles["orchestrator"]
-    settings["defaultModelSelection"] = {
-        "instanceId": parent["provider"], "model": parent["model"],
-        "options": [{"id": OPTION[parent["provider"]], "value": parent["effort"]}],
-    }
+    if rows is None:
+        settings.pop("defaultModelSelection", None)
+    else:
+        validate_profile(name, rows)
+        parent = rows["orchestrator"]
+        settings["defaultModelSelection"] = {
+            "instanceId": parent["provider"], "model": parent["model"],
+            "options": [{"id": OPTION[parent["provider"]], "value": parent["effort"]}],
+        }
     settings["linkedEnvironmentsEnabled"] = True
     instances = settings.setdefault("providerInstances", {})
     for provider in OPTION:
@@ -94,7 +123,7 @@ def prepare(name):
 
     policy = (ROOT / "skills/t3-boat/SKILL.md").read_text()
     table = ["## Active roles", "", "| Role | Provider | Model | Option |", "| --- | --- | --- | --- |"]
-    for role, row in roles.items():
+    for role, row in (rows or {}).items():
         table.append(f"| {role} | {row['provider']} | {row['model']} | {OPTION[row['provider']]}={row['effort']} |")
     skill = policy.rstrip() + "\n\n" + "\n".join(table) + "\n"
     targets = [
@@ -104,7 +133,7 @@ def prepare(name):
     updates = {}
     for provider, base, filename in targets:
         path = base / filename
-        if provider in enabled:
+        if rows is not None and provider in enabled:
             override = base / "AGENTS.override.md"
             if provider == "codex" and override.is_file() and override.stat().st_size:
                 raise ValueError(f"{override} masks the required global profile")
@@ -120,12 +149,11 @@ def prepare(name):
             updates[path] = instructions(path, note)
         elif path.exists():
             updates[path] = instructions(path, "")
-    role_path = home / "profiles" / (name + ".json")
-    if not role_path.exists():
-        updates[role_path] = (ROOT / "profiles" / role_path.name).read_text()
     updates[settings_path] = json.dumps(settings, indent=2) + "\n"
     # A provider's child shell may omit custom environment variables.
     updates[home / "profiles/active"] = name + "\n"
+    if save_selection:
+        updates[role_path] = json.dumps(rows, indent=2) + "\n"
     for path, data in updates.items():
         write(path, data)
 

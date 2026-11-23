@@ -2,7 +2,8 @@
 !bin/
 !bin/*
 !lib/
-!lib/role_profile.py
+!lib/*.py
+!lib/model_snapshot.mjs
 !scripts/
 !scripts/install-codex
 !scripts/install-claude

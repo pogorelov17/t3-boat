@@ -37,7 +37,7 @@ ENV HOME=/data \
 RUN install -d -m 700 -o node -g node /data \
     && usermod --home /data node
 COPY bin/ /opt/t3-boat/bin/
-COPY lib/role_profile.py /opt/t3-boat/lib/role_profile.py
+COPY lib/ /opt/t3-boat/lib/
 COPY --chmod=755 scripts/install-claude /usr/local/bin/install-claude
 COPY profiles/ /opt/t3-boat/profiles/
 COPY skills/t3-boat/SKILL.md /opt/t3-boat/skills/t3-boat/SKILL.md

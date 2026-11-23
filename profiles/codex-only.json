@@ -1,37 +1,37 @@
 {
   "orchestrator": {
     "provider": "codex",
-    "model": "gpt-6.2-astra",
+    "model": "astra",
     "effort": "high"
   },
   "executor": {
     "provider": "codex",
-    "model": "gpt-5.6-sol",
+    "model": "sol",
     "effort": "medium"
   },
   "reviewer1": {
     "provider": "codex",
-    "model": "gpt-6.2-astra",
+    "model": "astra",
     "effort": "high"
   },
   "reviewer2": {
     "provider": "codex",
-    "model": "gpt-6.2-sol",
+    "model": "sol",
     "effort": "high"
   },
   "scout": {
     "provider": "codex",
-    "model": "gpt-6-luna",
+    "model": "luna",
     "effort": "low"
   },
   "researcher": {
     "provider": "codex",
-    "model": "gpt-6.2-sol",
+    "model": "sol",
     "effort": "high"
   },
   "adjudicator": {
     "provider": "codex",
-    "model": "gpt-6.2-astra",
+    "model": "astra",
     "effort": "xhigh"
   }
 }

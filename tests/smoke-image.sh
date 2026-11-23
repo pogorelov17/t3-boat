@@ -33,6 +33,10 @@ for profile in codex-only claude-only codex+claude; do
     echo "Unexpected ready status for empty $profile volume" >&2
     exit 1
   fi
+  if [[ "$profile" == codex-only ]]; then
+    # The real server must return its provider snapshot even before login.
+    docker exec "$container" python3 -c 'import sys; sys.path.insert(0, "/opt/t3-boat/lib"); from model_catalog import provider_snapshot; assert any(p["instanceId"] == "codex" for p in provider_snapshot("codex")["providers"])'
+  fi
   # Exercise real setup, worker scripts and status against offline service doubles.
   docker exec -i "$container" sh -eu <<'SH'
 auth_tools=$(mktemp -d)
@@ -67,9 +71,30 @@ esac
 MOCK
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$auth_tools/install-claude"
 printf '%s\n' '#!/bin/sh' 'test "$1" = api' > "$auth_tools/gh"
+# Only the provider snapshot is simulated. Keep T3 and its local authentication real.
+cat > "$auth_tools/node" <<'MOCK'
+#!/bin/sh
+if [ "$1" != /opt/t3-boat/lib/model_snapshot.mjs ]; then exec /usr/local/bin/node "$@"; fi
+cat >/dev/null
+exec python3 - "$3" <<'PYTHON'
+import json, sys
+provider = sys.argv[1]
+if provider == "codex":
+    models = ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-luna"]
+    option = "reasoningEffort"
+else:
+    models = ["claude-opus-5-5", "claude-fable-5-2", "claude-haiku-5-5", "claude-sonnet-5-5"]
+    option = "effort"
+levels = [{"id": effort, "label": effort} for effort in ("low", "medium", "high", "xhigh")]
+caps = {"optionDescriptors": [{"id": option, "type": "select", "options": levels}]}
+rows = [{"slug": model, "name": model, "capabilities": caps} for model in models]
+print(json.dumps({"providers": [{"instanceId": provider, "driver": provider, "installed": True,
+    "enabled": True, "status": "ready", "auth": {"status": "authenticated"}, "models": rows}]}))
+PYTHON
+MOCK
 chmod +x "$auth_tools"/*
 export PATH="$auth_tools:$PATH"
-printf '\n\n' | t3-boat setup
+printf '\n\n\n' | t3-boat setup
 test ! -e "$HOME/check-vm"
 t3-boat status | grep -F 'Setup verified'
 SH
