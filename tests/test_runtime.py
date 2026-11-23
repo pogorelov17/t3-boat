@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import tempfile
@@ -137,6 +138,22 @@ class RuntimeTests(unittest.TestCase):
             ("install-claude",), ("boat", "env", "add-repo", "base", "owner/example"),
             ("boat-worker", "verify", "base", "owner/example")])
 
+    def test_check_vm_cleanup_waits_for_the_exact_operation(self):
+        def result(status, vm="bx_check"):
+            data = {"operation": {"id": "bdop_example", "targetId": vm, "kind": "sandbox", "status": status}}
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps(data))
+
+        for response, error in [(result("completed"), None), (result("blocked"), "blocked"),
+                                (result("completed", "bx_other"), "unexpected")]:
+            with self.subTest(response=response.stdout), patch.object(worker.time, "sleep"), \
+                    patch.object(worker.subprocess, "run", side_effect=[result("pending"), response]) as run:
+                if error:
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        worker.delete_check_vm("bx_check")
+                else:
+                    worker.delete_check_vm("bx_check")
+                self.assertEqual(run.call_args.args[0], ["boat", "deletion", "status", "bdop_example", "--json"])
+
     def test_failed_model_reply_or_cleanup_fails_worker_check(self):
         for failure in ("reply", "delete"):
             with self.subTest(failure=failure):
@@ -149,13 +166,15 @@ class RuntimeTests(unittest.TestCase):
                     if ((failure == "reply" and argv[1] == "ssh" and "claude -p" in argv[-1])
                             or (failure == "delete" and argv[1] == "delete")):
                         raise subprocess.CalledProcessError(1, argv)
+                    return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"operation": {
+                        "id": "bdop_check", "kind": "sandbox", "targetId": "bx_check", "status": "completed"}}))
 
                 with patch.dict(os.environ, T3_BOAT_PROFILE="codex+claude"), \
                         patch.object(worker, "provision", return_value="bx_check"), \
                         patch.object(worker.subprocess, "run", side_effect=remote), redirect_stdout(StringIO()), \
                         self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
                     worker.verify("base", "owner/example")
-                self.assertEqual(calls[-1], ["boat", "delete", "--yes", "bx_check"])
+                self.assertEqual(calls[-1], ["boat", "delete", "--yes", "bx_check", "--json"])
                 scripts = [c[-1] for c in calls if c[1] == "ssh"]
                 for expected in ("gh api", "ls-remote", "claude -p", "codex exec"):
                     self.assertTrue(any(expected in script for script in scripts), expected)

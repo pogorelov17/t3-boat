@@ -19,14 +19,14 @@ You need a Linux server with Docker Engine and SSH, a Boat account that can star
 
 ### 1. Start the container
 
-Run this on the server. Set `T3_BOAT_PROFILE` to `codex-only`, `claude-only`, or `codex+claude`. Docker downloads the published image on first use.
+Run this on the server. Set `T3_BOAT_PROFILE` to `codex-only`, `claude-only`, or `codex+claude`. Docker downloads the published image on first use. T3 uses the container hostname as its display name. The example uses the server’s short hostname so you can recognize it on your devices.
 
 ```sh
-docker run -d --name t3-boat --restart unless-stopped \
+docker run -d --name t3-boat --hostname "$(hostname -s)" --restart unless-stopped \
   -p 127.0.0.1:3773:3773 \
   -v t3-boat-data:/data \
   -e T3_BOAT_PROFILE=codex+claude \
-  pogorelov17/t3-boat:0.1.4
+  pogorelov17/t3-boat:0.1.5
 ```
 
 ### 2. Connect your accounts and verify a worker
@@ -68,9 +68,31 @@ In that SSH session, get a pairing link:
 docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url http://127.0.0.1:3773
 ```
 
-Open the printed link on your computer and keep the SSH session open while using T3. Closing that session or putting the computer to sleep interrupts this route. The container and chat history stay on the server. Run the SSH command again to reconnect to the same installation.
+For the desktop app, open **Settings → Environments → Add environment → Remote link** and paste the pairing URL. Opening the URL in a browser pairs that browser. Issue a fresh code to pair another client. Keep the SSH session open while using this route. Closing that session or putting the computer to sleep interrupts this route. The container and chat history stay on the server. Run the SSH command again to reconnect to the same installation.
 
 After a server rebuild, verify the new SSH host key fingerprint in your hosting console before updating the saved key on your computer. If the installation also has a fresh data volume, pair the client to its new T3 environment.
+
+</details>
+
+<details>
+<summary><strong>Keep T3 reachable when you close your laptop (T3 Connect)</strong></summary>
+
+Use the SSH route above to pair your desktop app first. On the server, link the container to your T3 Connect account. Follow the device approval prompt in your browser.
+
+```sh
+docker exec -it t3-boat t3 connect --headless
+```
+
+Once authorized, restart the container to apply the link. Do this between tasks. Docker already manages the server process if the CLI mentions a user-systemd service.
+
+```sh
+docker restart t3-boat
+docker exec t3-boat t3 connect status --base-dir /data/.t3
+```
+
+Provisioning can take a moment. Repeat the status command until it reports **Other devices can reach this machine** and **Tunnel connected**. In the desktop app’s **Settings → Environments**, add **T3 Connect** as a route for the paired server. Close the SSH forward, confirm the environment shows **via T3 Connect**, then send a message in a new chat. A reply confirms the route end to end. The tunnel runs on the server while your laptop sleeps.
+
+A fresh data volume creates a new T3 environment. If an older entry shows **tunnel is offline**, select the newly paired environment.
 
 </details>
 
@@ -80,7 +102,7 @@ If you are unsure where to begin, ask the orchestrator for ideas. Wait for a rep
 
 1. **Choose the repository for this change.** Use the URL of any GitHub repository you can work on. For a brand-new project, initializing the repository with a README gives the first PR a base commit.
 2. **Attach the repository.** If you supplied its URL during setup, continue to step 3. Otherwise rerun `docker exec -it t3-boat t3-boat setup` and enter the URL. Setup checks access from a fresh VM. The first real change exercises branch push and draft PR creation.
-3. **Continue the conversation.** Use your project chat. If you began in **Start here**, attaching the first repository keeps your planning thread there. When you are ready, ask for the first change you want. The executor implements it on Boat, checks the result, and opens a draft PR. Two reviewers examine the same commit. You decide when to merge.
+3. **Continue the conversation.** Use your project chat. If you began in **Start here**, attaching the first repository keeps your planning thread there. When you are ready, ask for the first change you want. The executor implements it on Boat, checks the result, and opens a draft PR. Two reviewers examine the same commit on separate VMs. The parent chat records their models, test results, verdicts and reviewed SHA. GitHub shows the draft PR and any checks configured by that repository. You decide when to merge.
 
 To work on another repository, rerun setup with its URL. To inspect current local logins, Boat configuration and the timestamp of the last successful VM check, run `docker exec t3-boat t3-boat status`. Status does not allocate a VM. Rerun setup for a fresh check after changing profiles, credentials or models.
 
