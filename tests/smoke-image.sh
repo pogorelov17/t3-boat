@@ -48,7 +48,10 @@ case "$1 $2" in
   'ai profiles') echo '{"profiles":[{"id":"creds","isDefault":true,"connected":["chatgpt-subscription","claude-subscription"]}]}' ;;
   'new --json') [ "${10}" = "--environment" ] && [ "${11}" = test ] || exit 1; touch "$HOME/check-vm"; echo '{"event":"ready","id":"bx_check"}' ;;
   'ssh bx_check') sh -ec "$3" ;;
-  'delete --yes') test "$3" = bx_check && rm "$HOME/check-vm" ;;
+  'delete --yes') test "$3" = bx_check || exit 1
+    echo '{"operation":{"id":"bdop_mock","targetId":"bx_check","kind":"sandbox","status":"pending"}}' ;;
+  'deletion status') test "$3" = bdop_mock && rm "$HOME/check-vm" || exit 1
+    echo '{"operation":{"id":"bdop_mock","targetId":"bx_check","kind":"sandbox","status":"completed"}}' ;;
   *) exit 1 ;;
 esac
 MOCK
