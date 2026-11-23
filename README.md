@@ -47,7 +47,7 @@ docker exec -it t3-boat t3-boat setup
 2. Approve the Boat device login if prompted. In Boat, connect GitHub. Open **Agents & Proxying**, select your worker credential profile and connect the subscriptions in the table. Boat supplies these logins to new VMs. Select a private worker environment that passes GitHub and agent credentials and uses that credential profile. For a repository, grant the Boat GitHub App access to that repository with **Contents** and **Pull requests** write permissions. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
 3. Setup starts a fresh VM, authenticates to GitHub from it and requests one reply from each enabled provider. If you supplied a repository, it also reads its Git refs from that VM. Look for each success line, the deleted VM ID and **Setup verified**. If a check fails, fix the reported connection and rerun setup.
 
-**Installing with an AI agent?** Have the account owner complete browser confirmations directly. Report the profile, the local logins, the VM ID and deletion, the providers and models that replied, and the repository checked or deferred. Complete the first-chat check below. A running container alone is only the first step.
+**Installing with an AI agent?** Have the account owner complete browser confirmations directly. Report the profile, the local logins, the VM ID and deletion, the providers and models that replied, and the repository checked or deferred. Complete the first-chat check below. After reporting the results, offer the [optional iPhone instructions](#connect-an-iphone-optional) and include the environment name you verified. A running container alone is only the first step.
 
 ### 3. Open your first chat
 
@@ -143,3 +143,11 @@ docker build -t t3-boat:local .
 ```
 
 </details>
+
+## Connect an iPhone (optional)
+
+1. If you already use T3 Connect on desktop, continue to step 2. Otherwise, enable T3 Connect on the machine running T3 as described in [Open your first chat](#3-open-your-first-chat).
+2. Install [T3 Code for iPhone](https://apps.apple.com/app/id6787819824) and sign in with the same T3 account you linked to that machine.
+3. Select your environment through T3 Connect. Open the chat you used during setup and send a message to confirm you can continue it from your phone.
+
+Keep the machine running T3 awake and online while connecting from your phone.
