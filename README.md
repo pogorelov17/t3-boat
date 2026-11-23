@@ -1,6 +1,6 @@
 # T3 + Boat
 
-Use a small Linux server to coordinate coding agents across your GitHub projects. Bring an idea or an existing repository, then work from a T3 chat using Codex, Claude, or both.
+Use a local or remote Linux machine to coordinate coding agents across your GitHub projects. Bring an idea or an existing repository, then work from a T3 chat using Codex, Claude, or both.
 
 [Quick start](#quick-start) · [Default role profiles](#default-role-profiles) · [Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases)
 
@@ -15,7 +15,7 @@ Suppose you ask in T3, “Fix the failing test and show me why it broke.”
 
 ## Quick start
 
-You need a Linux server with Docker Engine and SSH, a Boat account that can start a small VM, a GitHub account, and the subscriptions enabled in your profile. A repository is optional. The image supports AMD64 and ARM64. [Install Docker Engine](https://docs.docker.com/engine/install/).
+You need a Linux machine with Docker Engine, a Boat account that can start a small VM, a GitHub account, and the subscriptions enabled in your profile. A repository is optional. The image supports AMD64 and ARM64. [Install Docker Engine](https://docs.docker.com/engine/install/).
 
 ### 1. Start the container
 
@@ -56,28 +56,28 @@ In T3, select your repository, or **Start here** if you skipped the URL, and ope
 <details>
 <summary><strong>First time connecting this computer?</strong></summary>
 
-In a terminal on your computer, replace `USER@SERVER` with your SSH login and connect:
+If T3 runs on this computer, skip the SSH command and create the pairing link directly in a local terminal. For a remote machine, use SSH port forwarding. In a terminal on your computer, replace `USER@SERVER` with your SSH login and connect:
 
 ```sh
 ssh -L 127.0.0.1:3773:127.0.0.1:3773 -o ExitOnForwardFailure=yes USER@SERVER
 ```
 
-In that SSH session, get a pairing link:
+On the machine running Docker, get a pairing link:
 
 ```sh
 docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url http://127.0.0.1:3773
 ```
 
-For the desktop app, open **Settings → Environments → Add environment → Remote link** and paste the pairing URL. Opening the URL in a browser pairs that browser. Issue a fresh code to pair another client. Keep the SSH session open while using this route. Closing that session or putting the computer to sleep interrupts this route. The container and chat history stay on the server. Run the SSH command again to reconnect to the same installation.
+For the desktop app, open **Settings → Environments → Add environment → Remote link** and paste the pairing URL. Opening the URL in a browser pairs that browser. Issue a fresh code to pair another client. For a remote machine, keep the SSH session open while using port forwarding. Closing that session or putting the computer to sleep interrupts this route. The container and chat history stay on the server. Run the SSH command again to reconnect to the same installation.
 
-After a server rebuild, verify the new SSH host key fingerprint in your hosting console before updating the saved key on your computer. If the installation also has a fresh data volume, pair the client to its new T3 environment.
+After a server rebuild, verify the new SSH host key fingerprint at the machine’s console before updating the saved key on your computer. If the installation also has a fresh data volume, pair the client to its new T3 environment.
 
 </details>
 
 <details>
 <summary><strong>Keep T3 reachable when you close your laptop (T3 Connect)</strong></summary>
 
-Use the SSH route above to pair your desktop app first. On the server, link the container to your T3 Connect account. Follow the device approval prompt in your browser.
+Pair your desktop app using the steps above first. On the server, link the container to your T3 Connect account. Follow the device approval prompt in your browser.
 
 ```sh
 docker exec -it t3-boat t3 connect --headless
@@ -90,7 +90,7 @@ docker restart t3-boat
 docker exec t3-boat t3 connect status --base-dir /data/.t3
 ```
 
-Provisioning can take a moment. Repeat the status command until it reports **Other devices can reach this machine** and **Tunnel connected**. In the desktop app’s **Settings → Environments**, add **T3 Connect** as a route for the paired server. Close the SSH forward, confirm the environment shows **via T3 Connect**, then send a message in a new chat. A reply confirms the route end to end. The tunnel runs on the server while your laptop sleeps.
+Provisioning can take a moment. Repeat the status command until it reports **Other devices can reach this machine** and **Tunnel connected**. In the desktop app’s **Settings → Environments**, add **T3 Connect** as a route for the paired server. Close the SSH forward if you opened one, confirm the environment shows **via T3 Connect**, then send a message in a new chat. A reply confirms the route end to end. The tunnel runs on the server while your laptop sleeps.
 
 A fresh data volume creates a new T3 environment. If an older entry shows **tunnel is offline**, select the newly paired environment.
 
