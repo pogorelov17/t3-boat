@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from importlib.machinery import SourceFileLoader
@@ -87,12 +88,15 @@ class MigrationTests(unittest.TestCase):
         reordered["editor"] = {"provider": "codex", "model": "gpt-6.2-sol", "effort": "low", "note": "mine"}
         reordered[LEGACY] = parent
         reordered.update({k: rows[k] for k in keys[2:]})
-        path.write_text(json.dumps(reordered))
+        # Hand-formatted on purpose: a re-serialised backup would differ from these bytes.
+        text = "{\n" + ",\n".join(f"    {json.dumps(k)}:  {json.dumps(v)}" for k, v in reordered.items()) + "\n}  \n"
+        path.write_text(text)
         role_profile.migrate_profile(path)
         migrated = json.loads(path.read_text())
         self.assertEqual(list(migrated), renamed(reordered))
         self.assertEqual(migrated["editor"], reordered["editor"])
         self.assertEqual(migrated["lead"], parent)
+        self.assertEqual(path.with_name("codex+claude.json.pre-0.2").read_bytes(), text.encode())
 
     def test_both_parent_keys_are_an_error_naming_the_file(self):
         path = self.saved("claude-only")
@@ -123,6 +127,156 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(path.with_name("claude-only.json.pre-0.2").read_bytes(), original)
         selection = json.loads((self.home / ".t3/userdata/settings.json").read_text())["defaultModelSelection"]
         self.assertEqual(selection["model"], old[LEGACY]["model"])
+
+    def untouched_0_1_0(self):
+        original = (FIXTURES / "v0.1.0/claude-only.json").read_bytes()
+        self.saved("claude-only").write_bytes(original)
+        return original
+
+    def assert_0_1_0_fully_migrated(self, original):
+        path = self.saved("claude-only")
+        old = json.loads(original)
+        migrated = json.loads(path.read_text())
+        self.assertEqual(list(migrated), renamed(old))
+        self.assertEqual(migrated["lead"], old[LEGACY])
+        self.assertEqual(migrated["reviewer2"]["model"], "claude-sonnet-5-5")
+        self.assertEqual(migrated["adjudicator"]["model"], old["reviewer1"]["model"])
+        self.assertEqual(path.with_name("claude-only.json.pre-0.2").read_bytes(), original)
+
+    def assert_container_starts(self, original):
+        result = self.prepare("claude-only", check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_0_1_0_fully_migrated(original)
+        selection = json.loads((self.home / ".t3/userdata/settings.json").read_text())["defaultModelSelection"]
+        self.assertEqual(selection["model"], json.loads(original)[LEGACY]["model"])
+
+    def test_worker_first_read_fully_migrates_the_untouched_0_1_0_profile(self):
+        original = self.untouched_0_1_0()
+        with patch.dict(os.environ, T3_BOAT_PROFILE="claude-only"), \
+                patch.object(worker, "provision", side_effect=RuntimeError("stop before Boat")):
+            with self.assertRaisesRegex(RuntimeError, "stop before Boat"):
+                worker.verify("base")
+        self.assert_0_1_0_fully_migrated(original)
+        self.assert_container_starts(original)
+
+    def test_status_first_read_fully_migrates_the_untouched_0_1_0_profile(self):
+        original = self.untouched_0_1_0()
+        settings = self.home / ".t3/userdata/settings.json"  # written by the 0.1.x start
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{}\n")
+        with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "probe", return_value=None), \
+                patch.object(cli, "logged_in", return_value=True), patch.object(cli, "projects", return_value=[]), \
+                redirect_stdout(StringIO()):
+            cli.status("claude-only", cli.PROFILES["claude-only"])
+        self.assert_0_1_0_fully_migrated(original)
+        self.assert_container_starts(original)
+
+    def test_interrupted_first_start_of_the_untouched_0_1_0_profile_can_be_retried(self):
+        original = self.untouched_0_1_0()
+        instructions = self.home / ".claude/CLAUDE.md"
+        instructions.parent.mkdir()
+        instructions.write_text("My notes\n<!-- BEGIN t3-boat -->\n")
+        result = self.prepare("claude-only", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("marker block", result.stderr)
+        self.assert_0_1_0_fully_migrated(original)
+        instructions.write_text("My notes\n")
+        self.assert_container_starts(original)
+
+    def run_child(self, script, *args):
+        """Start a Python process that migrates with the given hooks installed."""
+        source = self.home / "child.py"
+        source.write_text("import os, subprocess, sys, time\n"
+                          f"sys.path.insert(0, {str(ROOT / 'lib')!r})\n"
+                          "import role_profile\n" + script)
+        return subprocess.Popen([sys.executable, str(source), *map(str, args)], env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def test_concurrent_migration_keeps_a_newer_saved_profile(self):
+        path = self.saved("codex-only")
+        legacy = legacy_roles(self.home, "codex-only")
+        paused, go = self.home / "paused", self.home / "go"
+        # The first migrator stops just before it replaces the profile.
+        first = self.run_child(
+            "target, paused, go = sys.argv[1:]\n"
+            "replace = os.replace\n"
+            "def held(source, destination, *args, **kwargs):\n"
+            "    if os.path.realpath(destination) == os.path.realpath(target):\n"
+            "        open(paused, 'w').close()\n"
+            "        deadline = time.monotonic() + 60\n"
+            "        while not os.path.exists(go) and time.monotonic() < deadline:\n"
+            "            time.sleep(0.02)\n"
+            "    return replace(source, destination, *args, **kwargs)\n"
+            "os.replace = held\n"
+            "role_profile.migrate_profile(role_profile.Path(target))\n", path, paused, go)
+        self.addCleanup(first.kill)
+        deadline = time.monotonic() + 30
+        while not paused.exists() and first.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not paused.exists():
+            self.fail(first.communicate(timeout=60))
+        # A second process migrates and saves an extra role meanwhile.
+        second = self.run_child(
+            "rows = role_profile.read_profile('codex-only')\n"
+            "rows['editor'] = {'provider': 'codex', 'model': 'gpt-6.2-sol', 'effort': 'low'}\n"
+            "role_profile.prepare('codex-only', rows)\n")
+        self.addCleanup(second.kill)
+        try:
+            second.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass  # Expected: it waits for the first migrator.
+        go.touch()
+        for child in (first, second):
+            out, err = child.communicate(timeout=60)
+            self.assertEqual(child.returncode, 0, err)
+        saved = json.loads(path.read_text())
+        self.assertEqual(list(saved), renamed(legacy) + ["editor"])
+        self.assertEqual(saved["lead"], legacy[LEGACY])
+
+    def test_an_existing_backup_is_never_replaced_by_a_racing_migrator(self):
+        path = self.saved("codex-only")
+        legacy_roles(self.home, "codex-only")
+        backup = path.with_name("codex-only.json.pre-0.2")
+        # Another process creates the backup right before this migrator publishes its own.
+        child = self.run_child(
+            "target, backup = sys.argv[1:]\n"
+            "competitor = 'import sys; open(sys.argv[1], \"x\").write(\"competitor\\\\n\")'\n"
+            "def racing(call):\n"
+            "    def wrapped(source, destination, *args, **kwargs):\n"
+            "        if os.path.realpath(destination) == os.path.realpath(backup) and not os.path.exists(backup):\n"
+            "            subprocess.run([sys.executable, '-c', competitor, backup], check=True)\n"
+            "        return call(source, destination, *args, **kwargs)\n"
+            "    return wrapped\n"
+            "os.replace, os.link = racing(os.replace), racing(os.link)\n"
+            "role_profile.migrate_profile(role_profile.Path(target))\n", path, backup)
+        self.addCleanup(child.kill)
+        out, err = child.communicate(timeout=60)
+        self.assertEqual(child.returncode, 0, err)
+        self.assertEqual(backup.read_text(), "competitor\n")
+        self.assertIn('"lead"', path.read_text())
+
+    def test_a_symlinked_profile_stays_a_link_and_its_target_migrates(self):
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+        legacy_roles(self.home, "codex-only")
+        target = elsewhere / "mine.json"
+        original = self.saved("codex-only").read_bytes()
+        target.write_bytes(original)
+        link = self.saved("codex-only")
+        link.unlink()
+        link.symlink_to(target)
+        rows = role_profile.read_profile("codex-only")
+        self.assertIn("lead", rows)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(target))
+        self.assertEqual(list(json.loads(target.read_text())), renamed(json.loads(original)))
+        self.assertEqual(target.with_name("mine.json.pre-0.2").read_bytes(), original)
+        self.assertFalse(link.with_name("codex-only.json.pre-0.2").exists())
+        # Saving a new selection writes through the link too.
+        rows["executor"]["effort"] = "low"
+        role_profile.prepare("codex-only", rows)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(json.loads(target.read_text())["executor"]["effort"], "low")
 
     def test_container_start_migrates_saved_profiles(self):
         for profile in role_profile.PROVIDERS:
@@ -156,6 +310,67 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(lines), 1, result.stderr)
         self.assertIn(str(path), lines[0])
         self.assertIn("Next:", lines[0])
+
+    def serve(self, profile="codex-only", **env):
+        return subprocess.run([str(ROOT / "bin/t3-boat"), "serve"], capture_output=True, text=True,
+                              env=self.env | {"T3_BOAT_PROFILE": profile} | env)
+
+    def test_serve_condenses_an_expected_profile_error(self):
+        path = self.saved("codex-only")
+        rows = legacy_roles(self.home, "codex-only")
+        rows["lead"] = rows[LEGACY]
+        path.write_text(json.dumps(rows))
+        result = self.serve()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertTrue(lines[0].startswith(f"T3 Boat profile: {path}: "), lines[0])
+        self.assertTrue(lines[0].endswith(
+            ". Next: repair the named file in the t3-boat-data volume, then restart the container."), lines[0])
+
+    def test_serve_passes_an_unexpected_failure_through(self):
+        legacy_roles(self.home, "codex-only")
+        hooks = self.home / "hooks"
+        hooks.mkdir()
+        (hooks / "sitecustomize.py").write_text(
+            "import json, sys\n"
+            "if sys.argv[0].endswith('role_profile.py'):\n"
+            "    def broken(*args, **kwargs):\n"
+            "        raise RuntimeError('simulated defect')\n"
+            "    json.loads = broken\n")
+        result = self.serve(PYTHONPATH=str(hooks))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Traceback (most recent call last):", result.stderr)
+        self.assertTrue(result.stderr.endswith("RuntimeError: simulated defect\n"), result.stderr)
+        self.assertNotIn("Next:", result.stderr)
+
+    def test_serve_names_a_truncated_settings_file(self):
+        legacy_roles(self.home, "codex-only")
+        settings = self.home / ".t3/userdata/settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('{"providerInstances": {')
+        result = self.serve()
+        self.assertEqual(result.returncode, 1)
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertTrue(lines[0].startswith(f"T3 Boat profile: {settings}: "), lines[0])
+        self.assertIn("Next:", lines[0])
+
+    def test_status_reports_both_parent_keys_with_the_file_name(self):
+        path = self.saved("codex-only")
+        rows = legacy_roles(self.home, "codex-only")
+        rows["lead"] = rows[LEGACY]
+        path.write_text(json.dumps(rows))
+        output = StringIO()
+        with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "probe", return_value=None), \
+                patch.object(cli, "logged_in", return_value=True), patch.object(cli, "projects", return_value=[]), \
+                redirect_stdout(output):
+            self.assertEqual(cli.status("codex-only", cli.PROFILES["codex-only"]), 1)
+        report = output.getvalue()
+        self.assertIn("[missing] Global profile codex-only applied", report)
+        self.assertIn(f"{path}: both `{LEGACY}` and `lead` roles are present", report)
+        self.assertIn("[missing] Boat account", report)
 
     def test_status_reads_an_unmigrated_profile(self):
         profile = "codex-only"
