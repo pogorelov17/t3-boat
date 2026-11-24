@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Apply one Docker installation's editable role table before starting T3."""
+import fcntl
 import json
 import hashlib
 import os
 import re
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -19,6 +21,7 @@ LEGACY_PARENT = "orchestrator"  # 0.1.x name of the parent role
 REQUIRED = (PARENT, "executor", "reviewer1", "reviewer2", "scout", "researcher", "adjudicator")
 OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
 CODEX_SOL = re.compile(r"gpt-[0-9]+(?:\.[0-9]+)*-sol(?:-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?")
+STOCK_0_1_0 = "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"  # claude-only.json
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
 
@@ -65,23 +68,91 @@ def validate_profile(name, rows):
     return rows
 
 
-def migrate_profile(target):
-    """Rename the 0.1.x parent role in a saved profile, keeping a backup of the original."""
+def durable_temporary(directory, data):
+    with NamedTemporaryFile(dir=directory, delete=False) as temporary:
+        temporary.write(data)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+    return Path(temporary.name)
+
+
+@contextmanager
+def profile_lock(target):
+    """Serialise reads that migrate and saves of one profile; yields the file behind any symlink."""
+    real = Path(os.path.realpath(target))
+    real.parent.mkdir(parents=True, exist_ok=True)
+    with (real.parent / ("." + real.name + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield real
+
+
+def keep_backup(backup, data):
+    """Create the backup only if none exists; an existing backup is never replaced."""
+    temporary = durable_temporary(backup.parent, data)
     try:
-        original = target.read_bytes()
+        os.link(temporary, backup)
+    except FileExistsError:
+        pass
+    except OSError:  # A file system without hard links: create-if-absent instead.
+        try:
+            with open(backup, "xb") as copy:
+                copy.write(data)
+                copy.flush()
+                os.fsync(copy.fileno())
+        except FileExistsError:
+            pass
+    finally:
+        temporary.unlink()
+
+
+def migrated_rows(name, original):
+    """Return the fully migrated rows for a saved 0.1.x profile, or None when it needs no migration."""
+    try:
         rows = json.loads(original)
-    except (FileNotFoundError, ValueError):
-        return False  # Missing or unreadable files are reported by the reader.
+    except ValueError:
+        return None  # Unreadable files are reported by the reader.
     if not isinstance(rows, dict) or LEGACY_PARENT not in rows:
-        return False
+        return None
     if PARENT in rows:
-        raise ValueError(f"{target}: both `{LEGACY_PARENT}` and `{PARENT}` roles are present; keep only `{PARENT}`")
-    backup = target.with_name(target.name + ".pre-0.2")
-    if not backup.exists():
-        write(backup, original)
-    rows = {(PARENT if role == LEGACY_PARENT else role): row for role, row in rows.items()}
-    write(target, json.dumps(rows, indent=2) + "\n")
+        raise ValueError(f"both `{LEGACY_PARENT}` and `{PARENT}` roles are present; keep only `{PARENT}`")
+    if name == "claude-only.json" and hashlib.sha256(original).hexdigest() == STOCK_0_1_0:
+        # The untouched 0.1.0 table: give the reviewers models distinct from the executor.
+        rows["reviewer2"]["model"] = "claude-sonnet-5-5"
+        rows["adjudicator"]["model"] = rows["reviewer1"]["model"]
+    return {(PARENT if role == LEGACY_PARENT else role): row for role, row in rows.items()}
+
+
+def migrate_locked(target, real):
+    try:
+        original = real.read_bytes()
+    except FileNotFoundError:
+        return False
+    try:
+        rows = migrated_rows(target.name, original)
+    except ValueError as exc:
+        raise ValueError(f"{target}: {exc}") from None
+    if rows is None:
+        return False
+    keep_backup(real.with_name(real.name + ".pre-0.2"), original)
+    temporary = durable_temporary(real.parent, (json.dumps(rows, indent=2) + "\n").encode())
+    try:
+        os.replace(temporary, real)
+    finally:
+        temporary.unlink(missing_ok=True)
     return True
+
+
+def migrate_profile(target):
+    """Apply every 0.1.x migration to a saved profile in one atomic replacement, keeping a backup."""
+    if not target.is_file():
+        return False  # Missing files are reported by the reader.
+    with profile_lock(target) as real:
+        return migrate_locked(target, real)
+
+
+def save_profile(target, rows):
+    with profile_lock(target) as real:
+        write(real, json.dumps(rows, indent=2) + "\n")
 
 
 def read_profile(name):
@@ -89,12 +160,13 @@ def read_profile(name):
     target = Path.home() / "profiles" / (name + ".json")
     if not target.is_file():
         raise ValueError("Select role models with t3-boat setup first")
-    migrate_profile(target)
-    source = target
+    with profile_lock(target) as real:
+        migrate_locked(target, real)
+        text = real.read_text()
     try:
-        return validate_profile(name, json.loads(source.read_text()))
+        return validate_profile(name, json.loads(text))
     except ValueError as exc:
-        raise ValueError(f"{source}: {exc}") from exc
+        raise ValueError(f"{target}: {exc}") from exc
 
 
 def instructions(path, content):
@@ -117,20 +189,13 @@ def prepare(name, rows=None):
     role_path = home / "profiles" / (name + ".json")
     save_selection = rows is not None
     if rows is None and role_path.is_file():
-        # Preserve the 0.1.0 migration for its exact stock table, detected before the rename.
-        stock_0_1_0 = name == "claude-only" and hashlib.sha256(role_path.read_bytes()).hexdigest() == (
-            "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb")
-        migrate_profile(role_path)
-        if stock_0_1_0:
-            rows = json.loads(role_path.read_text())
-            rows["reviewer2"]["model"] = "claude-sonnet-5-5"
-            rows["adjudicator"]["model"] = rows["reviewer1"]["model"]
-            save_selection = True
-        else:
-            rows = read_profile(name)
+        rows = read_profile(name)
     enabled = PROVIDERS[name]
     settings_path = Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
-    settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    try:
+        settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    except ValueError as exc:
+        raise ValueError(f"{settings_path}: {exc}") from None
     if rows is None:
         settings.pop("defaultModelSelection", None)
     else:
@@ -176,10 +241,10 @@ def prepare(name, rows=None):
     updates[settings_path] = json.dumps(settings, indent=2) + "\n"
     # A provider's child shell may omit custom environment variables.
     updates[home / "profiles/active"] = name + "\n"
-    if save_selection:
-        updates[role_path] = json.dumps(rows, indent=2) + "\n"
     for path, data in updates.items():
         write(path, data)
+    if save_selection:
+        save_profile(role_path, rows)
 
 
 if __name__ == "__main__":

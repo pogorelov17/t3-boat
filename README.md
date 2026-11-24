@@ -43,7 +43,7 @@ docker exec -it t3-boat t3-boat setup
 | `claude-only` | Claude Code with Claude | Claude subscription |
 | `codex+claude` | Both | Both subscriptions |
 
-1. Follow the login prompts. Existing valid sessions are reused. After sign-in, setup shows the model and reasoning level for each role. Press **Enter** to accept the table or select a role to customize it. At **GitHub repository URL**, enter a project URL or press **Enter** to open **Start here** with your own idea.
+1. Follow the login prompts. Existing valid sessions are reused. For Claude profiles, setup keeps an installed Claude Code that is the pinned version or newer, and if it cannot read the installed version it leaves Claude Code unchanged and prints a warning. After sign-in, setup shows the model and reasoning level for each role. Press **Enter** to accept the table or select a role to customize it. At **GitHub repository URL**, enter a project URL or press **Enter** to open **Start here** with your own idea.
 2. Approve the Boat device login if prompted. In Boat, connect GitHub. Open **Agents & Proxying**, select your worker credential profile and connect the subscriptions in the table. Boat supplies these logins to new VMs. Select a private worker environment that passes GitHub and agent credentials and uses that credential profile. For a repository, grant the Boat GitHub App access to that repository with **Contents** and **Pull requests** write permissions. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
 3. Setup starts a fresh VM, authenticates to GitHub from it and requests one reply from each enabled provider. If you supplied a repository, it also reads its Git refs from that VM. Look for each success line, the deleted VM ID and **Setup verified**. If a check fails, fix the reported connection and rerun setup.
 
@@ -131,7 +131,7 @@ Finish active jobs and back up the named volume privately. Stop and remove the o
 
 The stock Claude profile from 0.1.0 upgrades automatically. If you customized that profile, assign reviewer and adjudicator models distinct from the executor before upgrading.
 
-**Upgrading from 0.1.x.** The parent role formerly called `orchestrator` is now `lead`. Saved role profiles are migrated automatically when the container starts, and the original file is kept next to it as `profiles/PROFILE.json.pre-0.2`. A profile that lists both `orchestrator` and `lead` stops the start with a message naming the file; keep only `lead`. The rename also makes the saved VM-check receipts stale, so `t3-boat status` asks for `t3-boat setup` once after the upgrade.
+**Upgrading from 0.1.x.** The parent role formerly called `orchestrator` is now `lead`. Saved role profiles are migrated automatically when the container starts, and the original file is kept next to it as `profiles/PROFILE.json.pre-0.2`. If the profile is a symbolic link, the link is kept and the file it points to is migrated, with the backup beside that file. A profile that lists both `orchestrator` and `lead` stops the start with a message naming the file; keep only `lead`. The rename also makes the saved VM-check receipts stale, so `t3-boat status` asks for `t3-boat setup` once after the upgrade.
 
 </details>
 

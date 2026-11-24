@@ -4,15 +4,44 @@
 set -eu
 version=2.1.330
 prefix="$HOME/.local"
-if [ -x "$prefix/bin/claude" ]; then
-  installed=$("$prefix/bin/claude" --version 2>/dev/null | cut -d ' ' -f 1) || installed=
-  case "$installed" in
-    [0-9]*.[0-9]*) ;;
-    *) installed= ;;
+
+# Print "MAJOR MINOR PATCH PRE" for [v]MAJOR.MINOR.PATCH[-pre][+build], or nothing.
+fields() {
+  word=${1#v}
+  core=${word%%[-+]*}
+  case "$core" in
+    *[!0-9.]* | .* | *. | *..* | *.*.*.* | *[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) return ;;
+    *.*.*) ;;
+    *) return ;;
   esac
-  # Keep the installed version when it is the pinned one or newer.
-  if [ -n "$installed" ] && [ "$(printf '%s\n' "$version" "$installed" | sort -V | head -n 1)" = "$version" ]; then
+  case "${word#"$core"}" in
+    '' | +?*) pre= ;;
+    -?*) pre=yes ;;
+    *) return ;;
+  esac
+  major=${core%%.*}
+  rest=${core#*.}
+  echo "${major} ${rest%%.*} ${rest#*.} ${pre:-no}"
+}
+
+if [ -x "$prefix/bin/claude" ]; then
+  printed=$("$prefix/bin/claude" --version 2>/dev/null | head -n 1) || printed=
+  installed=$(fields "${printed%% *}")
+  if [ -z "$installed" ]; then
+    echo "install-claude: warning: unrecognised version '$printed' from $prefix/bin/claude; leaving it unchanged" >&2
     exit 0
+  fi
+  # shellcheck disable=SC2086
+  set -- $installed $(fields "$version")
+  # Keep the installed version unless it is older than the pinned one.
+  if [ "$1" -ne "$5" ]; then
+    [ "$1" -lt "$5" ] || exit 0
+  elif [ "$2" -ne "$6" ]; then
+    [ "$2" -lt "$6" ] || exit 0
+  elif [ "$3" -ne "$7" ]; then
+    [ "$3" -lt "$7" ] || exit 0
+  elif [ "$4" = no ]; then
+    exit 0  # A pre-release of the pinned version is older than the release.
   fi
 fi
 npm install --global --prefix "$prefix" --no-fund --no-audit "@anthropic-ai/claude-code@$version"

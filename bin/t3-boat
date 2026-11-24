@@ -33,6 +33,10 @@ class SetupError(Exception):
     pass
 
 
+class ProfileError(SetupError):
+    """A saved profile the user must repair; the message names the file."""
+
+
 def probe(*argv):
     """Never echo raw metadata: Boat environments can include secret values."""
     try:
@@ -168,6 +172,11 @@ def parent_role(profile):
     path = Path.home() / "profiles" / (profile + ".json")
     try:
         migrate_profile(path)
+    except ValueError as error:  # The message names the file, for example when both parent keys are present.
+        raise ProfileError(str(error)) from None
+    except OSError:
+        pass  # Reported as unreadable below.
+    try:
         return json.loads(path.read_text())[PARENT]
     except (OSError, KeyError, TypeError, ValueError):
         raise SetupError("The global role profile could not be read. Check docker logs t3-boat.") from None
@@ -271,11 +280,12 @@ def status(profile, providers):
             failures.append(label)
 
     report("T3 HTTP server", t3_online())
+    problem = None
     try:
+        lead = parent_role(profile)
         t3_home = Path(os.environ.get("T3CODE_HOME") or Path.home() / ".t3")
         settings = json.loads((t3_home / "userdata/settings.json").read_text())
         selection = settings.get("defaultModelSelection", {})
-        lead = parent_role(profile)
         expected = {("claudeAgent" if p == "claude" else p) for p in providers}
         instances = settings.get("providerInstances", {})
         option = "effort" if lead["provider"] == "claudeAgent" else "reasoningEffort"
@@ -284,9 +294,13 @@ def status(profile, providers):
                   and {"id": option, "value": lead["effort"]} in selection.get("options", [])
                   and all(instances.get(p, {}).get("enabled") is (p in expected) for p in ("codex", "claudeAgent"))
                   and settings.get("linkedEnvironmentsEnabled") is True)
+    except ProfileError as error:
+        active, problem = False, error
     except (OSError, ValueError, KeyError, TypeError, SetupError):
         active = False
     report(f"Global profile {profile} applied", active)
+    if problem:
+        print(f"  {problem}")
     for provider in providers:
         report(f"Local {provider} subscription login", logged_in(provider))
     registered = projects()
@@ -334,8 +348,11 @@ def main():
         result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/role_profile.py"), profile],
                                 stderr=subprocess.PIPE, text=True)
         if result.returncode:
-            detail = (result.stderr.strip().splitlines() or ["T3 Boat profile could not be applied."])[-1]
-            sys.exit(f"{detail.rstrip('.')}. Next: repair the named file in the t3-boat-data volume, then restart the container.")
+            detail = (result.stderr.strip().splitlines() or [""])[-1]
+            if detail.startswith("T3 Boat profile:"):
+                sys.exit(f"{detail.rstrip('.')}. Next: repair the named file in the t3-boat-data volume, then restart the container.")
+            sys.stderr.write(result.stderr)
+            sys.exit(result.returncode)
         sys.stderr.write(result.stderr)
         os.chdir(Path.home())
         os.execvp("t3", ["t3", "--no-browser", "--host", "0.0.0.0", "--port", "3773"])
