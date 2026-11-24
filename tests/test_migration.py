@@ -1,4 +1,5 @@
 """Saved 0.1.x profiles keep working after the parent role became `lead`."""
+import errno
 import json
 import os
 import subprocess
@@ -552,16 +553,16 @@ class MigrationTests(unittest.TestCase):
                     "def no_link(*args, **kwargs):\n"
                     "    raise OSError(errno.EPERM, 'Operation not permitted')\n"
                     "os.link = no_link\n")
-        # The first run is killed as soon as it opens the backup itself for writing.
+        # The first run is killed when it publishes the backup, after its temporary file is written.
         first = self.run_child(
-            no_links + "target, backup = sys.argv[1:]\n"
-            "def killed(event, args):\n"
-            "    if event == 'open' and args[0] == backup and args[1] not in (None, 'r', 'rb'):\n"
-            "        os.close(os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY))\n"
-            "        os._exit(9)\n"
-            "sys.addaudithook(killed)\n"
-            "role_profile.migrate_profile(role_profile.Path(target))\n", path, backup)
+            no_links + "def killed(*args, **kwargs):\n"
+            "    os._exit(9)\n"
+            "role_profile.no_replace = killed\n"
+            "role_profile.migrate_profile(role_profile.Path(sys.argv[1]))\n", path)
         first.communicate(timeout=60)
+        self.assertEqual(first.returncode, 9)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(backup.exists())
         second = self.run_child(no_links + "role_profile.migrate_profile(role_profile.Path(sys.argv[1]))\n", path)
         out, err = second.communicate(timeout=60)
         self.assertEqual(second.returncode, 0, err)
@@ -641,6 +642,207 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("lead", role_profile.read_profile("codex-only"))
         self.assertEqual(set(os.listdir(self.profiles)) - before,
                          {"codex-only.json.pre-0.2", ".codex-only.json.lock", "notes.tmp"})
+
+
+    # Repair round 3
+
+    def changed_rows(self):
+        rows = seeded_roles(self.home, "codex-only")
+        rows["executor"]["effort"] = "low"
+        return rows
+
+    def assert_save_refused(self, path, rows, reason):
+        before = path.read_bytes()
+        with patch.object(role_profile, "durable_temporary") as temporary:
+            with self.assertRaisesRegex(role_profile.ProfileError, f"{path}.*{reason}"):
+                role_profile.save_profile(path, rows)
+            with self.assertRaisesRegex(role_profile.ProfileError, f"{path}.*{reason}"):
+                role_profile.prepare("codex-only", rows)
+        temporary.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_changed_save_is_refused_when_the_held_lock_file_is_read_only(self):
+        path = self.saved("codex-only")
+        rows = self.changed_rows()
+        lock = self.profiles / ".codex-only.json.lock"
+        lock.touch()
+        lock.chmod(0o444)
+        if os.access(lock, os.W_OK):
+            self.skipTest("running as a user that ignores file permissions")
+        held, release = self.home / "held", self.home / "release"
+        holder = self.run_child(
+            "import fcntl\n"
+            "lock, held, release = sys.argv[1:]\n"
+            "with open(lock) as handle:\n"
+            "    fcntl.flock(handle, fcntl.LOCK_EX)\n"
+            "    open(held, 'w').close()\n"
+            "    deadline = time.monotonic() + 60\n"
+            "    while not os.path.exists(release) and time.monotonic() < deadline:\n"
+            "        time.sleep(0.02)\n", lock, held, release)
+        self.addCleanup(holder.kill)
+        deadline = time.monotonic() + 30
+        while not held.exists() and holder.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not held.exists():
+            self.fail(holder.communicate(timeout=60))
+        self.assert_save_refused(path, rows, "Permission denied")
+        release.touch()
+        holder.communicate(timeout=60)
+
+    def test_a_changed_save_is_refused_when_locks_are_unsupported(self):
+        path = self.saved("codex-only")
+        rows = self.changed_rows()
+        with patch.object(role_profile.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "No locks available")):
+            self.assert_save_refused(path, rows, "No locks available")
+
+    def test_an_identical_save_without_a_lock_returns_quietly(self):
+        path = self.saved("codex-only")
+        rows = seeded_roles(self.home, "codex-only")
+        before = path.read_bytes()
+        with patch.object(role_profile.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "No locks available")), \
+                patch.object(role_profile, "durable_temporary") as temporary:
+            role_profile.save_profile(path, rows)
+        temporary.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_legacy_tables_in_other_unicode_encodings_are_rejected(self):
+        for encoding in ("utf-16", "utf-16-le", "utf-32"):
+            with self.subTest(encoding=encoding):
+                path = self.saved("codex-only")
+                legacy = legacy_roles(self.home, "codex-only")
+                path.write_bytes((json.dumps(legacy, indent=2) + "\n").encode(encoding))
+                before = path.read_bytes()
+                backup = path.with_name("codex-only.json.pre-0.2")
+                with self.assertRaisesRegex(role_profile.ProfileError, str(path)):
+                    role_profile.read_profile("codex-only")
+                result = self.serve()
+                self.assertEqual(result.returncode, 1)
+                lines = result.stderr.splitlines()
+                self.assertEqual(len(lines), 1, result.stderr)
+                self.assertTrue(lines[0].startswith(f"T3 Boat profile: {path}: "), lines[0])
+                self.assertEqual(path.read_bytes(), before)
+                self.assertFalse(backup.exists())
+
+    def test_status_shows_an_unparsable_profile(self):
+        path = self.saved("codex-only")
+        path.write_text('{"lead": ')
+        code, report = self.status_report()
+        self.assertEqual(code, 1)
+        self.assertIn(str(path), report)
+        self.assertIn("Expecting value", report)
+
+    def test_a_defect_in_the_first_parse_is_not_retried(self):
+        seeded_roles(self.home, "codex-only")
+        loads = json.loads
+        calls = []
+
+        def broken_once(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise ValueError("defect")
+            return loads(*args, **kwargs)
+
+        with patch.object(role_profile.json, "loads", broken_once):
+            with self.assertRaises(ValueError) as raised:
+                role_profile.read_profile("codex-only")
+        self.assertNotIsInstance(raised.exception, role_profile.ProfileError)
+        self.assertEqual(str(raised.exception), "defect")
+
+    def defect_hook(self, source):
+        hooks = self.home / "hooks"
+        hooks.mkdir(exist_ok=True)
+        (hooks / "sitecustomize.py").write_text("import sys\nif sys.argv[0].endswith('role_profile.py'):\n" + source)
+        return str(hooks)
+
+    def test_a_defect_in_validation_keeps_its_traceback(self):
+        seeded_roles(self.home, "codex-only")
+        hooks = self.defect_hook(
+            "    def entered(frame, event, arg):\n"
+            "        if event == 'call' and frame.f_code.co_name == 'validate_profile':\n"
+            "            sys.setprofile(None)\n"
+            "            raise ValueError('simulated defect')\n"
+            "    sys.setprofile(entered)\n")
+        result = self.serve(PYTHONPATH=hooks)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Traceback (most recent call last):", result.stderr)
+        self.assertTrue(result.stderr.endswith("ValueError: simulated defect\n"), result.stderr)
+        self.assertNotIn("T3 Boat profile:", result.stderr)
+        self.assertNotIn("Next:", result.stderr)
+
+    def test_invalid_rows_are_still_named(self):
+        path = self.saved("codex-only")
+        rows = seeded_roles(self.home, "codex-only")
+        rows["lead"]["provider"] = "claudeAgent"
+        path.write_text(json.dumps(rows, indent=2) + "\n")
+        lines = self.serve().stderr.splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith(f"T3 Boat profile: {path}: invalid provider for lead"), lines[0])
+
+    def test_a_defect_reading_settings_keeps_its_traceback(self):
+        seeded_roles(self.home, "codex-only")
+        settings = self.home / ".t3/userdata/settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{}\n")
+        hooks = self.defect_hook(
+            "    import pathlib\n"
+            "    read_bytes = pathlib.Path.read_bytes\n"
+            "    def broken(self):\n"
+            "        if self.name == 'settings.json':\n"
+            "            raise ValueError('simulated defect')\n"
+            "        return read_bytes(self)\n"
+            "    pathlib.Path.read_bytes = broken\n")
+        result = self.serve(PYTHONPATH=hooks)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Traceback (most recent call last):", result.stderr)
+        self.assertTrue(result.stderr.endswith("ValueError: simulated defect\n"), result.stderr)
+        self.assertNotIn("T3 Boat profile:", result.stderr)
+
+    def test_settings_that_are_not_utf8_are_named(self):
+        seeded_roles(self.home, "codex-only")
+        settings = self.home / ".t3/userdata/settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_bytes(b'{"x": "\xff"}\n')
+        lines = self.serve().stderr.splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith(f"T3 Boat profile: {settings}: "), lines[0])
+        self.assertIn("Next:", lines[0])
+
+    def test_stale_temporary_files_in_a_read_only_directory_are_left(self):
+        seeded_roles(self.home, "codex-only")
+        (self.profiles / ".codex-only.json.lock").touch()
+        stale = self.profiles / ".codex-only.json.t3-boat-tmp-stale"
+        stale.write_text("partial")
+        self.read_only_profiles()
+        self.assertIn("lead", role_profile.read_profile("codex-only"))
+        self.assertTrue(stale.exists())
+
+    def test_a_refused_final_replacement_is_a_clear_error(self):
+        path = self.saved("codex-only")
+        legacy_roles(self.home, "codex-only")
+        original = path.read_bytes()
+        before = set(os.listdir(self.profiles))
+        replace = os.replace
+
+        def refused(source, destination, *args, **kwargs):
+            if os.path.realpath(destination) == os.path.realpath(path):
+                raise PermissionError(errno.EACCES, "Permission denied", str(destination))
+            return replace(source, destination, *args, **kwargs)
+
+        with patch.object(role_profile.os, "replace", refused):
+            with self.assertRaisesRegex(role_profile.ProfileError,
+                                        f"{path}: needs migration to 0.2 but cannot be written: Permission denied"):
+                role_profile.migrate_profile(path)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(set(os.listdir(self.profiles)) - before, {"codex-only.json.pre-0.2", ".codex-only.json.lock"})
+
+    def test_settings_entries_this_tool_does_not_use_are_left_alone(self):
+        seeded_roles(self.home, "codex-only")
+        settings = self.home / ".t3/userdata/settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('{"providerInstances": {"custom": 7}}\n')
+        result = self.prepare("codex-only", check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(settings.read_text())["providerInstances"]["custom"], 7)
 
 
 class WorkerStartTests(unittest.TestCase):

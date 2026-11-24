@@ -113,6 +113,20 @@ class RolePickerTests(unittest.TestCase):
         self.assertEqual(list(json.loads(self.saved.read_text())), list(rows))
         self.assertEqual(json.loads(self.saved.with_name(self.saved.name + ".pre-0.2").read_text()), legacy)
 
+    def test_a_saved_profile_that_is_not_utf8_is_named_before_any_prompt(self):
+        self.saved.parent.mkdir(parents=True, exist_ok=True)
+        self.saved.write_bytes(b'{"lead": "\xff"}\n')
+        before = self.saved.read_bytes()
+        prompts = []
+        with patch("builtins.input", side_effect=lambda prompt: prompts.append(prompt) or ""), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, str(self.saved)) as raised:
+                self.configure(PROFILE)
+        self.assertNotIsInstance(raised.exception, UnicodeDecodeError)
+        self.assertEqual(prompts, [])
+        self.assertEqual(self.saved.read_bytes(), before)
+        self.assertFalse(self.saved.with_name(self.saved.name + ".pre-0.2").exists())
+
     def test_numbered_options_allow_editing_effort_without_changing_model(self):
         self.choose("1", "", "unlisted-model", "", "1", "")
         rows = json.loads(self.saved.read_text())

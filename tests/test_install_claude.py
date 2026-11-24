@@ -153,6 +153,18 @@ class InstallClaudeTests(unittest.TestCase):
     def test_a_literal_backslash_n_is_quoted_unchanged(self):
         self.assert_kept_with_one_warning("bad\\nversion\n", "bad\\nversion")
 
+    def test_a_carriage_return_ends_the_version_token(self):
+        major, minor, patch = map(int, PINNED.split("."))
+        older = f"{major}.{minor}.{patch - 1}"
+        for output in (f"{older}\r\n", f"{older}\r", f"{older} (Claude Code)\r\n"):
+            with self.subTest(output=output):
+                fake_claude(self.claude, None, output)
+                self.assertIsNotNone(self.install())
+                self.assertEqual(self.stderr, "")
+        fake_claude(self.claude, None, f"{PINNED}\r\n")
+        self.assertIsNone(self.install())
+        self.assert_kept_with_one_warning("garbage\r\n", "garbage")
+
     def test_only_the_first_line_is_read(self):
         major, minor, patch = map(int, PINNED.split("."))
         fake_claude(self.claude, None, f"{major}.{minor}.{patch - 1} (Claude Code)\n{PINNED}\n")
