@@ -19,7 +19,9 @@ The parent chat is the orchestrator / team lead. Discuss ideas, requirements and
 
 ## PR access
 
-Before the first PR handoff in a project thread, confirm T3 can reach the repository's pull requests. List its open PRs with T3's `pull_request_list`. Any successful response, including an empty list, confirms access. Keep any integration that already succeeds, such as the Boat GitHub App or an existing `gh` login. If T3 reports missing GitHub credentials, guide the owner to install the GitHub CLI (`gh`) on the T3 server where the T3 service's `PATH` finds it. As the OS user that runs the T3 service, they run `gh auth login --hostname github.com --web` and authorize a GitHub account with access to the repository. Retry `pull_request_list` from the project thread. Never request tokens or codes in chat.
+Before the first PR handoff in a project thread, confirm T3 can reach the repository's pull requests. List its open PRs with T3's `pull_request_list`. Any successful response, including an empty list, confirms access. Keep any integration that already succeeds, such as the Boat GitHub App or an existing `gh` login.
+
+If T3 reports missing credentials, check for GitHub CLI (`gh`) as the T3 service user. In the shipped Docker image, run `docker exec <container> gh --version`. If absent, obtain the official Linux `gh` binary for the container's architecture and verify its release checksum. From the Docker host, run `docker exec <container> mkdir -p /data/.local/bin`, then `docker cp ./gh <container>:/data/.local/bin/gh` using the extracted executable. This directory is on the service's `PATH` and persists on the data volume. Run `docker exec -it <container> gh auth login --hostname github.com --web` as the default service user and authorize an account with repository access. Retry `pull_request_list` from the project thread. Never request tokens or codes in chat.
 
 ## Parent history and cleanup
 
