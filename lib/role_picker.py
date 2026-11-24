@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from model_catalog import catalog
-from role_profile import MISSING, PROVIDERS, ROOT, prepare, saved_rows, validate_profile
+from role_profile import MISSING, PROVIDERS, ROOT, ProfileError, json_kind, prepare, saved_rows, validate_profile
 
 
 def stable_version(provider, family, model):
@@ -68,6 +68,20 @@ def assignment(row):
     return " / ".join(row.get(key, "?") for key in ("provider", "model", "effort"))
 
 
+def saved_assignments(saved):
+    """Return a saved profile's rows after migration, or MISSING; a file the picker cannot show names itself."""
+    rows = saved_rows(saved, missing=MISSING)
+    if rows is MISSING:
+        return rows
+    if not isinstance(rows, dict):
+        raise ProfileError(f"{saved}: expected a JSON object of roles, found {json_kind(rows)}")
+    if any(not isinstance(row, dict) or any(not isinstance(row.get(key, ""), str)
+                                            for key in ("provider", "model", "effort"))
+           for row in rows.values()):
+        raise ProfileError(f"{saved}: each role must be an object with string provider, model and effort")
+    return rows
+
+
 def configure_roles(profile):
     if profile not in PROVIDERS:
         raise ValueError(f"Unknown role profile {profile!r}")
@@ -83,14 +97,8 @@ def configure_roles(profile):
     saved = Path.home() / "profiles" / (profile + ".json")
     templates = json.loads((ROOT / "profiles" / saved.name).read_text())
     defaults = resolve_defaults(profile, templates, available)
-    rows = saved_rows(saved, missing=MISSING)
+    rows = saved_assignments(saved)
     if rows is not MISSING:
-        if not isinstance(rows, dict) or any(
-            not isinstance(row, dict) or any(not isinstance(row.get(key, ""), str)
-                                            for key in ("provider", "model", "effort"))
-            for row in rows.values()
-        ):
-            raise ValueError(f"Cannot read role entries in {saved}. Repair the JSON and rerun setup.")
         print(f"Saved role assignments for {profile}")
     else:
         rows = {role: dict(row) for role, row in defaults.items()}

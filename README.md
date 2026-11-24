@@ -131,7 +131,7 @@ Finish active jobs and back up the named volume privately. Stop and remove the o
 
 The stock Claude profile from 0.1.0 upgrades automatically. If you customized that profile, assign reviewer and adjudicator models distinct from the executor before upgrading.
 
-**Upgrading from 0.1.x.** The parent role formerly called `orchestrator` is now `lead`. Saved role profiles are migrated automatically when the container starts, and the original file is kept next to it as `profiles/PROFILE.json.pre-0.2`. If the profile is a symbolic link, the link is kept and the file it points to is migrated, with the backup beside that file. A profile that lists both `orchestrator` and `lead` stops the start with a message naming the file; keep only `lead`. The rename also makes the saved VM-check receipts stale, so `t3-boat status` asks for `t3-boat setup` once after the upgrade.
+**Upgrading from 0.1.x.** The parent role formerly called `orchestrator` is now `lead`. Saved role profiles are migrated automatically when the container starts, and the original file is kept next to it as `profiles/PROFILE.json.pre-0.2`. If the profile is a symbolic link, the link is kept and the file it points to is migrated, with the backup beside that file. A profile that lists both `orchestrator` and `lead` stops the start with a message naming the file; keep only `lead`. A profile that would not be valid after the rename (for example, one with a missing role or a provider outside the profile) is left unchanged, without a backup, and the start and `t3-boat setup` stop with a one-line message naming the file. The rename also makes the saved VM-check receipts stale, so `t3-boat status` asks for `t3-boat setup` once after the upgrade.
 
 </details>
 

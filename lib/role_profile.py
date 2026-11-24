@@ -48,9 +48,15 @@ def check_profile_name(name):
         raise ProfileError("T3_BOAT_PROFILE must be one of: " + ", ".join(PROVIDERS))
 
 
+def json_kind(value):
+    return {type(None): "null", list: "an array", str: "a string", bool: "a boolean"}.get(type(value), "a number")
+
+
 def validate_profile(name, rows):
     check_profile_name(name)
-    if not isinstance(rows, dict) or not set(REQUIRED).issubset(rows):
+    if not isinstance(rows, dict):
+        raise ProfileError(f"expected a JSON object of roles, found {json_kind(rows)}")
+    if not set(REQUIRED).issubset(rows):
         raise ProfileError("expected roles " + ", ".join(REQUIRED))
     for role, row in rows.items():
         if not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", role) or not isinstance(row, dict):
@@ -188,6 +194,10 @@ def migrate_locked(target, real, unlocked):
         raise ProfileError(f"{target}: {exc}") from None
     if migrated is None:
         return rows, False
+    try:  # Never back up or rewrite a file whose migrated rows would not load.
+        validate_profile(target.name.removesuffix(".json"), migrated)
+    except ProfileError as exc:
+        raise ProfileError(f"{target}: needs migration to 0.2 but is invalid: {exc}") from None
     if unlocked:
         raise ProfileError(f"{target}: needs migration to 0.2 but cannot be locked: {unlocked}")
     data = (json.dumps(migrated, indent=2) + "\n").encode()
@@ -244,7 +254,7 @@ def read_profile(name):
         raise ProfileError("Select role models with t3-boat setup first")
     with profile_lock(target) as (real, unlocked):
         rows = migrate_locked(target, real, unlocked)[0]
-    if rows is MISSING or rows is None:
+    if rows is MISSING:
         raise ProfileError(f"{target}: the file disappeared while it was read")
     try:
         return validate_profile(name, rows)

@@ -15,8 +15,9 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from role_profile import PARENT, read_profile, saved_rows, write
-from role_picker import configure_roles
+import role_profile
+from role_profile import MISSING, PARENT, read_profile, saved_rows, write
+from role_picker import configure_roles, saved_assignments
 
 PROFILES = {
     "codex-only": ("codex",),
@@ -171,11 +172,13 @@ def bind_project(slug, label):
 def parent_role(profile):
     path = Path.home() / "profiles" / (profile + ".json")
     try:
-        rows = saved_rows(path)
+        rows = saved_rows(path, missing=MISSING)
     except ValueError as error:  # The message names the file, for example when both parent keys are present.
         raise ProfileError(str(error)) from None
     except OSError as error:
         raise ProfileError(f"{path}: {error}") from None
+    if rows is not MISSING and not isinstance(rows, dict):
+        raise ProfileError(f"{path}: expected a JSON object of roles, found {role_profile.json_kind(rows)}")
     try:
         return rows[PARENT]
     except (KeyError, TypeError):
@@ -209,7 +212,11 @@ def setup(profile, providers):
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
     # Name an unreadable saved profile before installing anything or asking for a sign-in.
-    saved_rows(Path.home() / "profiles" / (profile + ".json"))
+    path = Path.home() / "profiles" / (profile + ".json")
+    try:
+        saved_assignments(path)
+    except OSError as error:
+        raise ProfileError(f"{path}: {error.strerror or error}") from None
     for provider in providers:
         if provider == "claude":
             run("install-claude")
@@ -370,5 +377,8 @@ if __name__ == "__main__":
     os.umask(0o077)
     try:
         sys.exit(main())
+    except (ProfileError, role_profile.ProfileError) as error:
+        # The message names the file to repair; rerunning setup first would fail the same way.
+        sys.exit(f"T3 Boat profile: {error}")
     except (SetupError, ValueError, EOFError, OSError, KeyboardInterrupt) as error:
         sys.exit(f"{error or 'Setup interrupted.'}\nNext: docker exec -it t3-boat t3-boat setup")
