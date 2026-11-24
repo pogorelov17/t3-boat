@@ -12,7 +12,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from profile_fixtures import FIXTURES, legacy_roles
+from profile_fixtures import FIXTURES, legacy_roles, seeded_roles
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
@@ -394,6 +394,252 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "stop before Boat"):
                 worker.verify("base")
         self.assertEqual(list(json.loads(self.saved("codex-only").read_text())), renamed(legacy))
+
+
+    # Repair round 2.
+
+    def status_report(self, profile="codex-only"):
+        output = StringIO()
+        with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "probe", return_value=None), \
+                patch.object(cli, "logged_in", return_value=True), patch.object(cli, "projects", return_value=[]), \
+                redirect_stdout(output):
+            code = cli.status(profile, cli.PROFILES[profile])
+        return code, output.getvalue()
+
+    def test_serve_names_settings_that_are_not_objects(self):
+        settings = self.home / ".t3/userdata/settings.json"
+        settings.parent.mkdir(parents=True)
+        for text in ("[]\n", '{"providerInstances": []}\n', '{"providerInstances": {"codex": 3}}\n'):
+            with self.subTest(settings=text):
+                legacy_roles(self.home, "codex-only")
+                settings.write_text(text)
+                result = self.serve()
+                self.assertEqual(result.returncode, 1)
+                lines = result.stderr.splitlines()
+                self.assertEqual(len(lines), 1, result.stderr)
+                self.assertTrue(lines[0].startswith(f"T3 Boat profile: {settings}: "), lines[0])
+                self.assertIn("Next:", lines[0])
+                self.assertEqual(settings.read_text(), text)
+
+    def test_a_profile_that_is_not_utf8_is_named(self):
+        path = self.saved("codex-only")
+        path.write_bytes(b'{"lead": "\xff"}\n')
+        with self.assertRaisesRegex(ValueError, str(path)):
+            role_profile.read_profile("codex-only")
+        lines = self.serve().stderr.splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith(f"T3 Boat profile: {path}: "), lines[0])
+
+    def test_programming_errors_are_not_reported_as_profile_errors(self):
+        legacy_roles(self.home, "codex-only")
+        hooks = self.home / "hooks"
+        hooks.mkdir()
+        for error in ("TypeError", "AttributeError", "ValueError", "OSError"):
+            with self.subTest(error=error):
+                (hooks / "sitecustomize.py").write_text(
+                    "import json, sys\n"
+                    "if sys.argv[0].endswith('role_profile.py'):\n"
+                    "    def broken(*args, **kwargs):\n"
+                    f"        raise {error}('simulated defect')\n"
+                    "    json.dumps = broken\n")
+                result = self.serve(PYTHONPATH=str(hooks))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Traceback (most recent call last):", result.stderr)
+                self.assertTrue(result.stderr.endswith(f"{error}: simulated defect\n"), result.stderr)
+                self.assertNotIn("T3 Boat profile:", result.stderr)
+                self.assertNotIn("Next:", result.stderr)
+
+    def test_serve_keeps_earlier_helper_output_before_the_condensed_line(self):
+        path = self.saved("codex-only")
+        rows = legacy_roles(self.home, "codex-only")
+        rows["lead"] = rows[LEGACY]
+        path.write_text(json.dumps(rows))
+        hooks = self.home / "hooks"
+        hooks.mkdir()
+        (hooks / "sitecustomize.py").write_text(
+            "import sys\n"
+            "if sys.argv[0].endswith('role_profile.py'):\n"
+            "    sys.stderr.write('warning: first\\nwarning: second\\n')\n")
+        lines = self.serve(PYTHONPATH=str(hooks)).stderr.splitlines()
+        self.assertEqual(lines[:2], ["warning: first", "warning: second"])
+        self.assertEqual(len(lines), 3, lines)
+        self.assertTrue(lines[2].startswith(f"T3 Boat profile: {path}: "), lines[2])
+        self.assertIn("Next:", lines[2])
+
+    def test_status_reports_migration_io_errors(self):
+        legacy_roles(self.home, "codex-only")
+        with patch.object(cli, "migrate_profile", side_effect=PermissionError(13, "Permission denied", "/x/lockfile")):
+            code, report = self.status_report()
+        self.assertEqual(code, 1)
+        self.assertIn("[missing] Global profile codex-only applied", report)
+        self.assertIn("Permission denied", report)
+        self.assertIn("/x/lockfile", report)
+
+    def read_only_profiles(self):
+        self.profiles.chmod(0o555)
+        self.addCleanup(self.profiles.chmod, 0o755)
+        if os.access(self.profiles, os.W_OK):
+            self.skipTest("running as a user that ignores directory permissions")
+
+    def assert_reads_without_lock(self, profile="codex-only"):
+        self.assertIn("lead", role_profile.read_profile(profile))
+        self.assertEqual(self.prepare(profile, check=False).returncode, 0)
+        code, report = self.status_report(profile)
+        self.assertIn(f"[ok] Global profile {profile} applied", report)
+
+    def assert_legacy_needs_lock(self, path, reason):
+        with self.assertRaisesRegex(ValueError, f"{path}.*{reason}"):
+            role_profile.read_profile("codex-only")
+        lines = self.serve().stderr.splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith(f"T3 Boat profile: {path}: "), lines[0])
+        self.assertIn(reason, lines[0])
+        code, report = self.status_report()
+        self.assertIn(str(path), report)
+        self.assertIn(LEGACY, path.read_text())
+
+    def test_a_read_only_profiles_directory_with_a_migrated_profile_works(self):
+        seeded_roles(self.home, "codex-only")
+        self.read_only_profiles()
+        self.assert_reads_without_lock()
+
+    def test_a_read_only_profiles_directory_with_a_legacy_profile_is_a_clear_error(self):
+        path = self.saved("codex-only")
+        legacy_roles(self.home, "codex-only")
+        self.read_only_profiles()
+        self.assert_legacy_needs_lock(path, "Permission denied")
+
+    def unsupported_locks(self):
+        hooks = self.home / "hooks"
+        hooks.mkdir(exist_ok=True)
+        (hooks / "sitecustomize.py").write_text(
+            "import errno, fcntl\n"
+            "def unsupported(*args, **kwargs):\n"
+            "    raise OSError(errno.ENOLCK, 'No locks available')\n"
+            "fcntl.flock = unsupported\n")
+        self.env["PYTHONPATH"] = str(hooks)
+        flock = patch.object(role_profile.fcntl, "flock", side_effect=OSError(37, "No locks available"))
+        flock.start()
+        self.addCleanup(flock.stop)
+
+    def test_unsupported_locks_with_a_migrated_profile_work(self):
+        seeded_roles(self.home, "codex-only")
+        self.unsupported_locks()
+        self.assert_reads_without_lock()
+
+    def test_unsupported_locks_with_a_legacy_profile_are_a_clear_error(self):
+        path = self.saved("codex-only")
+        legacy_roles(self.home, "codex-only")
+        self.unsupported_locks()
+        self.assert_legacy_needs_lock(path, "No locks available")
+
+    def test_an_empty_backup_from_an_interrupted_run_is_replaced(self):
+        path = self.saved("codex-only")
+        legacy_roles(self.home, "codex-only")
+        original = path.read_bytes()
+        backup = path.with_name("codex-only.json.pre-0.2")
+        backup.touch()
+        self.assertTrue(role_profile.migrate_profile(path))
+        self.assertEqual(backup.read_bytes(), original)
+
+    def test_backup_without_hard_links_survives_an_interruption(self):
+        path = self.saved("codex-only")
+        legacy_roles(self.home, "codex-only")
+        original = path.read_bytes()
+        backup = path.with_name("codex-only.json.pre-0.2")
+        no_links = ("import errno\n"
+                    "def no_link(*args, **kwargs):\n"
+                    "    raise OSError(errno.EPERM, 'Operation not permitted')\n"
+                    "os.link = no_link\n")
+        # The first run is killed as soon as it opens the backup itself for writing.
+        first = self.run_child(
+            no_links + "target, backup = sys.argv[1:]\n"
+            "def killed(event, args):\n"
+            "    if event == 'open' and args[0] == backup and args[1] not in (None, 'r', 'rb'):\n"
+            "        os.close(os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY))\n"
+            "        os._exit(9)\n"
+            "sys.addaudithook(killed)\n"
+            "role_profile.migrate_profile(role_profile.Path(target))\n", path, backup)
+        first.communicate(timeout=60)
+        second = self.run_child(no_links + "role_profile.migrate_profile(role_profile.Path(sys.argv[1]))\n", path)
+        out, err = second.communicate(timeout=60)
+        self.assertEqual(second.returncode, 0, err)
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertIn('"lead"', path.read_text())
+
+    def test_the_backup_exists_before_the_profile_is_replaced(self):
+        path = self.saved("codex-only")
+        legacy_roles(self.home, "codex-only")
+        original = path.read_bytes()
+        backup = path.with_name("codex-only.json.pre-0.2")
+        seen = []
+        replace = os.replace
+
+        def checked(source, destination, *args, **kwargs):
+            if os.path.realpath(destination) == os.path.realpath(path):
+                seen.append(backup.read_bytes() if backup.exists() else None)
+            return replace(source, destination, *args, **kwargs)
+
+        with patch.object(role_profile.os, "replace", checked):
+            self.assertTrue(role_profile.migrate_profile(path))
+        self.assertEqual(seen, [original])
+
+    def test_saving_a_profile_waits_for_the_lock(self):
+        path = self.saved("codex-only")
+        rows = seeded_roles(self.home, "codex-only")
+        held, release = self.home / "held", self.home / "release"
+        holder = self.run_child(
+            "target, held, release = sys.argv[1:]\n"
+            "with role_profile.profile_lock(role_profile.Path(target)):\n"
+            "    open(held, 'w').close()\n"
+            "    deadline = time.monotonic() + 60\n"
+            "    while not os.path.exists(release) and time.monotonic() < deadline:\n"
+            "        time.sleep(0.02)\n", path, held, release)
+        self.addCleanup(holder.kill)
+        deadline = time.monotonic() + 30
+        while not held.exists() and holder.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not held.exists():
+            self.fail(holder.communicate(timeout=60))
+        rows["executor"]["effort"] = "low"
+        saver = self.run_child(
+            "import json\n"
+            "role_profile.save_profile(role_profile.Path(sys.argv[1]), json.loads(sys.argv[2]))\n",
+            path, json.dumps(rows))
+        self.addCleanup(saver.kill)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            saver.wait(timeout=2)
+        self.assertNotEqual(json.loads(path.read_text())["executor"]["effort"], "low")
+        release.touch()
+        out, err = saver.communicate(timeout=60)
+        self.assertEqual(saver.returncode, 0, err)
+        self.assertEqual(json.loads(path.read_text())["executor"]["effort"], "low")
+        holder.communicate(timeout=60)
+
+    def test_stale_temporary_files_are_removed_under_the_lock(self):
+        path = self.saved("codex-only")
+        legacy_roles(self.home, "codex-only")
+        before = set(os.listdir(self.profiles))
+        # A migrator killed just before it replaces the profile leaves its temporary file behind.
+        child = self.run_child(
+            "target = sys.argv[1]\n"
+            "replace = os.replace\n"
+            "def killed(source, destination, *args, **kwargs):\n"
+            "    if os.path.realpath(destination) == os.path.realpath(target):\n"
+            "        os._exit(9)\n"
+            "    return replace(source, destination, *args, **kwargs)\n"
+            "os.replace = killed\n"
+            "role_profile.migrate_profile(role_profile.Path(target))\n", path)
+        child.communicate(timeout=60)
+        leftovers = set(os.listdir(self.profiles)) - before - {"codex-only.json.pre-0.2", ".codex-only.json.lock"}
+        self.assertTrue(leftovers)
+        for name in leftovers:
+            self.assertTrue(name.startswith(".codex-only.json.t3-boat-tmp-"), name)
+        unrelated = self.profiles / "notes.tmp"
+        unrelated.write_text("mine\n")
+        self.assertIn("lead", role_profile.read_profile("codex-only"))
+        self.assertEqual(set(os.listdir(self.profiles)) - before,
+                         {"codex-only.json.pre-0.2", ".codex-only.json.lock", "notes.tmp"})
 
 
 class WorkerStartTests(unittest.TestCase):

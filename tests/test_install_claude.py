@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/install-claude"
 PINNED = re.search(r"^version=(\S+)$", SCRIPT.read_text(), re.MULTILINE)[1]
+SHELL = shutil.which("dash") or "sh"  # The image runs the script with dash.
 
 
 def fake_claude(path, version, output=None):
@@ -37,7 +39,7 @@ class InstallClaudeTests(unittest.TestCase):
                     "PATH": os.pathsep.join([str(self.claude.parent), str(tools), os.environ["PATH"]])}
 
     def install(self):
-        result = subprocess.run(["sh", str(SCRIPT)], env=self.env, capture_output=True, text=True)
+        result = subprocess.run([SHELL, str(SCRIPT)], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.stderr = result.stderr
         args = self.home / "npm-args"
@@ -99,6 +101,57 @@ class InstallClaudeTests(unittest.TestCase):
                 self.assertEqual(len(lines), 1, self.stderr)
                 self.assertIn("warning", lines[0].lower())
                 self.assertIn(f"'{printed}", lines[0])
+
+    def assert_kept_with_one_warning(self, output, quoted):
+        fake_claude(self.claude, None, output)
+        before = self.claude.read_bytes()
+        self.assertIsNone(self.install())
+        self.assertEqual(self.claude.read_bytes(), before)
+        lines = self.stderr.splitlines()
+        self.assertEqual(len(lines), 1, self.stderr)
+        self.assertIn("warning", lines[0].lower())
+        self.assertIn(f"'{quoted}'", lines[0])
+
+    def test_malformed_version_tokens_are_kept_with_a_warning(self):
+        major, minor, patch = map(int, PINNED.split("."))
+        for token in (f"{PINNED}-!!!", f"{PINNED}-rc..1", "1.0.0+..", f"{PINNED}.1", f"{PINNED}-", f"{PINNED}+",
+                      f"{PINNED}-rc.", f"{PINNED}+build+5", f"vv{PINNED}", f"{major}.{minor}", f"{PINNED}x"):
+            with self.subTest(token=token):
+                self.assert_kept_with_one_warning(f"{token} (Claude Code)\n", f"{token} (Claude Code)")
+
+    def test_numeric_fields_have_no_length_limit(self):
+        major, minor, patch = map(int, PINNED.split("."))
+        cases = {
+            f"{major - 1}.1000000000.0": True,
+            f"{major}.{minor}.{'0' * 12}{patch - 1}": True,  # leading zeros do not make a number larger
+            "99999999999999999999.0.0": False,
+            f"{major}.{minor}.{'0' * 12}{patch}": False,
+            f"{major}.{minor}.99999999999999999999999": False,
+        }
+        for version, installs in cases.items():
+            with self.subTest(installed=version):
+                fake_claude(self.claude, version)
+                self.assertEqual(self.install() is not None, installs, self.stderr)
+                self.assertEqual(self.stderr, "")
+
+    def test_pre_release_and_build_identifiers(self):
+        major, minor, patch = map(int, PINNED.split("."))
+        cases = {
+            f"{PINNED}-rc.1": True,
+            f"{PINNED}-alpha-2.x-y.0": True,
+            f"{major}.{minor}.{patch + 1}-rc.1": False,
+            f"v{major}.{minor + 1}.0": False,
+            f"{PINNED}+build.5": False,
+            f"{PINNED}-rc.1+build-7.a": True,
+        }
+        for version, installs in cases.items():
+            with self.subTest(installed=version):
+                fake_claude(self.claude, version)
+                self.assertEqual(self.install() is not None, installs, self.stderr)
+                self.assertEqual(self.stderr, "")
+
+    def test_a_literal_backslash_n_is_quoted_unchanged(self):
+        self.assert_kept_with_one_warning("bad\\nversion\n", "bad\\nversion")
 
     def test_only_the_first_line_is_read(self):
         major, minor, patch = map(int, PINNED.split("."))
