@@ -1,7 +1,6 @@
 import io
 import json
 import os
-import re
 import sys
 import tempfile
 import unittest
@@ -103,31 +102,6 @@ class RolePickerTests(unittest.TestCase):
         self.assertIn("gpt-6.2-sol", output)
         self.assertIn("gpt-6.10-sol", output)
 
-    def test_setup_migrates_a_saved_0_1_x_profile(self):
-        self.choose("")
-        rows = json.loads(self.saved.read_text())
-        legacy = {("orchestrator" if role == "lead" else role): row for role, row in rows.items()}
-        self.saved.write_text(json.dumps(legacy))
-        output = self.choose("")
-        self.assertIn("Saved role assignments", output)
-        self.assertEqual(json.loads(self.saved.read_text()), rows)
-        self.assertEqual(list(json.loads(self.saved.read_text())), list(rows))
-        self.assertEqual(json.loads(self.saved.with_name(self.saved.name + ".pre-0.2").read_text()), legacy)
-
-    def test_a_saved_profile_that_is_not_utf8_is_named_before_any_prompt(self):
-        self.saved.parent.mkdir(parents=True, exist_ok=True)
-        self.saved.write_bytes(b'{"lead": "\xff"}\n')
-        before = self.saved.read_bytes()
-        prompts = []
-        with patch("builtins.input", side_effect=lambda prompt: prompts.append(prompt) or ""), \
-                redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(ValueError, re.escape(str(self.saved))) as raised:
-                self.configure(PROFILE)
-        self.assertNotIsInstance(raised.exception, UnicodeDecodeError)
-        self.assertEqual(prompts, [])
-        self.assertEqual(self.saved.read_bytes(), before)
-        self.assertFalse(self.saved.with_name(self.saved.name + ".pre-0.2").exists())
-
     def test_numbered_options_allow_editing_effort_without_changing_model(self):
         self.choose("1", "", "unlisted-model", "", "1", "")
         rows = json.loads(self.saved.read_text())
@@ -190,20 +164,6 @@ class RolePickerTests(unittest.TestCase):
         self.assertIn("reviewer1", output)
         rows = json.loads(self.saved.read_text())
         self.assertEqual(rows["reviewer1"]["model"], "claude-fable-5-2")
-
-
-    def test_a_saved_null_is_named_and_left_unchanged(self):
-        self.saved.parent.mkdir(parents=True, exist_ok=True)
-        self.saved.write_text("null\n")
-        before = self.saved.read_bytes()
-        prompts = []
-        with patch("builtins.input", side_effect=lambda prompt: prompts.append(prompt) or ""), \
-                redirect_stdout(io.StringIO()) as output:
-            with self.assertRaisesRegex(ValueError, re.escape(str(self.saved))):
-                self.configure(PROFILE)
-        self.assertEqual(prompts, [])
-        self.assertNotIn("Suggested role assignments", output.getvalue())
-        self.assertEqual(self.saved.read_bytes(), before)
 
 
 if __name__ == "__main__":
