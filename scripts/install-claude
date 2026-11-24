@@ -4,8 +4,16 @@
 set -eu
 version=2.1.330
 prefix="$HOME/.local"
-if [ -x "$prefix/bin/claude" ] && [ "$("$prefix/bin/claude" --version | cut -d ' ' -f 1)" = "$version" ]; then
-  exit 0
+if [ -x "$prefix/bin/claude" ]; then
+  installed=$("$prefix/bin/claude" --version 2>/dev/null | cut -d ' ' -f 1) || installed=
+  case "$installed" in
+    [0-9]*.[0-9]*) ;;
+    *) installed= ;;
+  esac
+  # Keep the installed version when it is the pinned one or newer.
+  if [ -n "$installed" ] && [ "$(printf '%s\n' "$version" "$installed" | sort -V | head -n 1)" = "$version" ]; then
+    exit 0
+  fi
 fi
 npm install --global --prefix "$prefix" --no-fund --no-audit "@anthropic-ai/claude-code@$version"
 "$prefix/bin/claude" --version

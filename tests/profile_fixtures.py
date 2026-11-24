@@ -17,3 +17,15 @@ def seeded_roles(home, profile):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(rows, indent=2) + "\n")
     return rows
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def legacy_roles(home, profile):
+    """Create a 0.1.x installation whose saved parent role still uses the old key."""
+    rows = seeded_roles(home, profile)
+    legacy = {("orchestrator" if role == "lead" else role): row for role, row in rows.items()}
+    target = Path(home) / "profiles" / (profile + ".json")
+    target.write_text(json.dumps(legacy, indent=2) + "\n")
+    return legacy

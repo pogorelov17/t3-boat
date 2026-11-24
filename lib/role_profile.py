@@ -14,7 +14,9 @@ PROVIDERS = {
     "claude-only": ("claudeAgent",),
     "codex+claude": ("codex", "claudeAgent"),
 }
-REQUIRED = ("orchestrator", "executor", "reviewer1", "reviewer2", "scout", "researcher", "adjudicator")
+PARENT = "lead"
+LEGACY_PARENT = "orchestrator"  # 0.1.x name of the parent role
+REQUIRED = (PARENT, "executor", "reviewer1", "reviewer2", "scout", "researcher", "adjudicator")
 OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
 CODEX_SOL = re.compile(r"gpt-[0-9]+(?:\.[0-9]+)*-sol(?:-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?")
 BEGIN = "<!-- BEGIN t3-boat -->"
@@ -22,7 +24,7 @@ END = "<!-- END t3-boat -->"
 
 
 def write(target, content):
-    data = content.encode()
+    data = content if isinstance(content, bytes) else content.encode()
     if target.exists() and target.read_bytes() == data:
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -63,11 +65,31 @@ def validate_profile(name, rows):
     return rows
 
 
+def migrate_profile(target):
+    """Rename the 0.1.x parent role in a saved profile, keeping a backup of the original."""
+    try:
+        original = target.read_bytes()
+        rows = json.loads(original)
+    except (FileNotFoundError, ValueError):
+        return False  # Missing or unreadable files are reported by the reader.
+    if not isinstance(rows, dict) or LEGACY_PARENT not in rows:
+        return False
+    if PARENT in rows:
+        raise ValueError(f"{target}: both `{LEGACY_PARENT}` and `{PARENT}` roles are present; keep only `{PARENT}`")
+    backup = target.with_name(target.name + ".pre-0.2")
+    if not backup.exists():
+        write(backup, original)
+    rows = {(PARENT if role == LEGACY_PARENT else role): row for role, row in rows.items()}
+    write(target, json.dumps(rows, indent=2) + "\n")
+    return True
+
+
 def read_profile(name):
     check_profile_name(name)
     target = Path.home() / "profiles" / (name + ".json")
     if not target.is_file():
         raise ValueError("Select role models with t3-boat setup first")
+    migrate_profile(target)
     source = target
     try:
         return validate_profile(name, json.loads(source.read_text()))
@@ -95,9 +117,11 @@ def prepare(name, rows=None):
     role_path = home / "profiles" / (name + ".json")
     save_selection = rows is not None
     if rows is None and role_path.is_file():
-        # Preserve the 0.1.0 migration for its exact stock table.
-        if name == "claude-only" and hashlib.sha256(role_path.read_bytes()).hexdigest() == (
-                "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"):
+        # Preserve the 0.1.0 migration for its exact stock table, detected before the rename.
+        stock_0_1_0 = name == "claude-only" and hashlib.sha256(role_path.read_bytes()).hexdigest() == (
+            "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb")
+        migrate_profile(role_path)
+        if stock_0_1_0:
             rows = json.loads(role_path.read_text())
             rows["reviewer2"]["model"] = "claude-sonnet-5-5"
             rows["adjudicator"]["model"] = rows["reviewer1"]["model"]
@@ -111,7 +135,7 @@ def prepare(name, rows=None):
         settings.pop("defaultModelSelection", None)
     else:
         validate_profile(name, rows)
-        parent = rows["orchestrator"]
+        parent = rows[PARENT]
         settings["defaultModelSelection"] = {
             "instanceId": parent["provider"], "model": parent["model"],
             "options": [{"id": OPTION[parent["provider"]], "value": parent["effort"]}],
@@ -139,7 +163,7 @@ def prepare(name, rows=None):
                 raise ValueError(f"{override} masks the required global profile")
             skill_path = base / "skills/t3-boat/SKILL.md"
             note = (
-                f"The active T3 Boat profile is `{name}`. You are the orchestrator / team lead. "
+                f"The active T3 Boat profile is `{name}`. You are the team lead, unless your task assigns you another role. "
                 f"Respond to the user's opening message in their language. If they ask where to begin, suggest a starting point based on their interests. "
                 f"Discuss ideas and plan new projects in this chat without starting a VM. Before any project inspection, tests, research or code changes, "
                 f"load and follow {skill_path} automatically. Every project uses this workflow. "

@@ -5,11 +5,11 @@ description: Run T3 project tasks on disposable Boat VMs, hand off through draft
 
 # Boat project workflow
 
-The parent chat is the orchestrator / team lead. Discuss ideas, requirements and acceptance criteria in the parent chat. A planning conversation needs only the orchestrator. Use the user's language. Start this workflow only for repository inspection, tests, changes or research requested for a project.
+The parent chat is the team lead. Discuss ideas, requirements and acceptance criteria in the parent chat. A planning conversation needs only the team lead. Use the user's language. Start this workflow only for repository inspection, tests, changes or research requested for a project.
 
 ## Start and delegate
 
-1. Read the role table below. Check the current thread provider, model and effort against the orchestrator row. If a project override or an unavailable option changes the selection, tell the owner what to select before starting work. Never silently substitute. Use the table even if the task mentions no model.
+1. Read the role table below. Check the current thread provider, model and effort against the `lead` row. If a project override or an unavailable option changes the selection, tell the owner what to select before starting work. Never silently substitute. Use the table even if the task mentions no model.
 2. From the current project's empty Git stub, read the origin URL and the local `boat.environment` setting. For implementation in an unbound workspace, guide the owner to create a GitHub repository with a README or choose an existing repository, then attach it using `t3-boat setup`. Resume the plan in the bound workspace. Keep all repository files, dependencies, tests and builds on Boat.
 3. For each needed role, run `boat-worker start ROLE` from this stub. Record the returned VM and linked environment IDs. Check `orchestrator_capabilities` for the linked environment, selected provider, exact model and option. Use T3's native `delegate_task` with that environment, provider instance, model and options. If the option or model is missing, report it and release the VM. Require each child to confirm the model and option when visible. Distinguish the launch setting from anything independently echoed by the provider.
 4. Use the scout for code discovery with file/line evidence, and the researcher for external questions with primary source links and dates. Boat environments can pre-clone the project under the worker's home. Verify the checkout's origin against the requested repository, use that checkout if it matches, or clone on the VM if absent. For tests alone the executor checks out the requested revision, runs the tests and reports the commands, SHA and results. Read-only work needs no PR.

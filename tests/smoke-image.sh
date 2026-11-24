@@ -102,8 +102,8 @@ test ! -e "$HOME/check-vm"
 t3-boat status | grep -F 'Setup verified'
 SH
   role_file="/data/profiles/$profile.json"
-  provider=$(docker exec "$container" jq -er .orchestrator.provider "$role_file")
-  model=$(docker exec "$container" jq -er .orchestrator.model "$role_file")
+  provider=$(docker exec "$container" jq -er .lead.provider "$role_file")
+  model=$(docker exec "$container" jq -er .lead.model "$role_file")
   # No accounts, networking or worker VM: only the transcript is under test.
   thread=$(docker exec "$container" t3 thread start /data/start-here 'Help me plan a small app' \
     --provider "$provider" --model "$model" --json | jq -er .threadId)

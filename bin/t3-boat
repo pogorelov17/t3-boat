@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from role_profile import read_profile, write
+from role_profile import PARENT, migrate_profile, read_profile, write
 from role_picker import configure_roles
 
 PROFILES = {
@@ -167,7 +167,8 @@ def bind_project(slug, label):
 def parent_role(profile):
     path = Path.home() / "profiles" / (profile + ".json")
     try:
-        return json.loads(path.read_text())["orchestrator"]
+        migrate_profile(path)
+        return json.loads(path.read_text())[PARENT]
     except (OSError, KeyError, TypeError, ValueError):
         raise SetupError("The global role profile could not be read. Check docker logs t3-boat.") from None
 
@@ -274,13 +275,13 @@ def status(profile, providers):
         t3_home = Path(os.environ.get("T3CODE_HOME") or Path.home() / ".t3")
         settings = json.loads((t3_home / "userdata/settings.json").read_text())
         selection = settings.get("defaultModelSelection", {})
-        orchestrator = parent_role(profile)
+        lead = parent_role(profile)
         expected = {("claudeAgent" if p == "claude" else p) for p in providers}
         instances = settings.get("providerInstances", {})
-        option = "effort" if orchestrator["provider"] == "claudeAgent" else "reasoningEffort"
-        active = (selection.get("instanceId") == orchestrator["provider"]
-                  and selection.get("model") == orchestrator["model"]
-                  and {"id": option, "value": orchestrator["effort"]} in selection.get("options", [])
+        option = "effort" if lead["provider"] == "claudeAgent" else "reasoningEffort"
+        active = (selection.get("instanceId") == lead["provider"]
+                  and selection.get("model") == lead["model"]
+                  and {"id": option, "value": lead["effort"]} in selection.get("options", [])
                   and all(instances.get(p, {}).get("enabled") is (p in expected) for p in ("codex", "claudeAgent"))
                   and settings.get("linkedEnvironmentsEnabled") is True)
     except (OSError, ValueError, KeyError, TypeError, SetupError):
@@ -330,7 +331,12 @@ def main():
     if profile not in PROFILES:
         parser.error("set T3_BOAT_PROFILE to " + ", ".join(PROFILES))
     if args.command == "serve":
-        subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/role_profile.py"), profile], check=True)
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/role_profile.py"), profile],
+                                stderr=subprocess.PIPE, text=True)
+        if result.returncode:
+            detail = (result.stderr.strip().splitlines() or ["T3 Boat profile could not be applied."])[-1]
+            sys.exit(f"{detail.rstrip('.')}. Next: repair the named file in the t3-boat-data volume, then restart the container.")
+        sys.stderr.write(result.stderr)
         os.chdir(Path.home())
         os.execvp("t3", ["t3", "--no-browser", "--host", "0.0.0.0", "--port", "3773"])
     if args.command == "setup":

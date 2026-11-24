@@ -8,9 +8,9 @@ Use a local or remote Linux machine to coordinate coding agents across your GitH
 
 Suppose you ask in T3, “Fix the failing test and show me why it broke.”
 
-1. **T3 coordinates the work.** The orchestrator uses your installation’s role profile to select the executor and reviewers. New chats across your projects inherit those model and reasoning settings. If you are still discussing an idea, the conversation can stay in T3 until you have a task for a worker.
+1. **T3 coordinates the work.** The team lead uses your installation’s role profile to select the executor and reviewers. New chats across your projects inherit those model and reasoning settings. If you are still discussing an idea, the conversation can stay in T3 until you have a task for a worker.
 2. **Boat runs the code.** The executor checks out the repository on a disposable VM, reproduces the failure, tests the fix and opens a draft PR. Dependencies, builds and test runs stay on Boat, so your server only needs to host T3 and its history.
-3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit. Both send independent verdicts to the orchestrator. The first reviewer always uses a different model from the executor. If a fix is needed, a fresh executor updates the same PR and both reviewers check the new commit.
+3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit. Both send independent verdicts to the team lead. The first reviewer always uses a different model from the executor. If a fix is needed, a fresh executor updates the same PR and both reviewers check the new commit.
 4. **You decide when to merge.** The parent chat collects links to the agents, the test results, both verdicts and the PR. Once a worker’s result is recorded, its VM can be deleted. You can return to the chat or request another change on the PR without keeping workers running.
 
 ## Quick start
@@ -96,7 +96,7 @@ A fresh data volume creates a new T3 environment. If an older entry shows **tunn
 
 </details>
 
-If you are unsure where to begin, ask the orchestrator for ideas. Wait for a reply in the new chat to confirm your client can reach the orchestrator. Planning can continue there until you choose a repository.
+If you are unsure where to begin, ask the team lead for ideas. Wait for a reply in the new chat to confirm your client can reach the team lead. Planning can continue there until you choose a repository.
 
 ## Build your first feature
 
@@ -112,7 +112,7 @@ Each entry is a suggested model family and reasoning level. On first setup, the 
 
 | Role | Codex only | Claude only | Codex + Claude |
 | --- | --- | --- | --- |
-| Orchestrator | Astra · high | Opus · high | Astra · high |
+| Team lead | Astra · high | Opus · high | Astra · high |
 | Code scout | Luna · low | Haiku · medium | Haiku · medium |
 | Internet researcher | Sol · high | Opus · high | Sol · high |
 | **Executor** | **Sol · medium** | **Opus · high** | **Opus · high** |
@@ -131,12 +131,14 @@ Finish active jobs and back up the named volume privately. Stop and remove the o
 
 The stock Claude profile from 0.1.0 upgrades automatically. If you customized that profile, assign reviewer and adjudicator models distinct from the executor before upgrading.
 
+**Upgrading from 0.1.x.** The parent role formerly called `orchestrator` is now `lead`. Saved role profiles are migrated automatically when the container starts, and the original file is kept next to it as `profiles/PROFILE.json.pre-0.2`. A profile that lists both `orchestrator` and `lead` stops the start with a message naming the file; keep only `lead`. The rename also makes the saved VM-check receipts stale, so `t3-boat status` asks for `t3-boat setup` once after the upgrade.
+
 </details>
 
 <details>
 <summary><strong>Build a customized image</strong></summary>
 
-To change the packaged tools or orchestration instructions, build from your edited source checkout. Use `t3-boat:local` in the start command.
+To change the packaged tools or workflow instructions, build from your edited source checkout. Use `t3-boat:local` in the start command.
 
 ```sh
 docker build -t t3-boat:local .

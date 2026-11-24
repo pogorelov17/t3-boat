@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from model_catalog import catalog
-from role_profile import PROVIDERS, ROOT, prepare, validate_profile
+from role_profile import PROVIDERS, ROOT, migrate_profile, prepare, validate_profile
 
 
 def stable_version(provider, family, model):
@@ -83,6 +83,7 @@ def configure_roles(profile):
     saved = Path.home() / "profiles" / (profile + ".json")
     templates = json.loads((ROOT / "profiles" / saved.name).read_text())
     defaults = resolve_defaults(profile, templates, available)
+    migrate_profile(saved)
     if saved.exists():
         rows = json.loads(saved.read_text())
         if not isinstance(rows, dict) or any(

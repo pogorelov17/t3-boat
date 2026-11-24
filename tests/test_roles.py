@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from profile_fixtures import seeded_roles
+from profile_fixtures import FIXTURES, seeded_roles
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,10 +110,7 @@ class RoleTests(unittest.TestCase):
     def test_stock_claude_volume_upgrades_to_independent_review(self):
         path = self.home / "profiles/claude-only.json"
         path.parent.mkdir()
-        old = seeded_roles(self.home, "claude-only")
-        for role in ("reviewer2", "adjudicator"):
-            old[role] = dict(old["executor"])
-        path.write_text(json.dumps(old, indent=2) + "\n")
+        path.write_bytes((FIXTURES / "v0.1.0/claude-only.json").read_bytes())
         self.prepare("claude-only")
         upgraded = json.loads(path.read_text())
         for role in ("reviewer1", "reviewer2", "adjudicator"):
@@ -124,7 +121,7 @@ class RoleTests(unittest.TestCase):
         self.prepare("claude-only")
         path = self.home / "profiles/claude-only.json"
         rows = json.loads(path.read_text())
-        rows["orchestrator"].update(model="custom-opus", effort="medium")
+        rows["lead"].update(model="custom-opus", effort="medium")
         path.write_text(json.dumps(rows))
         self.prepare("claude-only")
         settings = self.home / ".t3/userdata/settings.json"

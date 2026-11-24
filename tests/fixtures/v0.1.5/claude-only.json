@@ -1,0 +1,37 @@
+{
+  "orchestrator": {
+    "provider": "claudeAgent",
+    "model": "opus",
+    "effort": "high"
+  },
+  "executor": {
+    "provider": "claudeAgent",
+    "model": "opus",
+    "effort": "high"
+  },
+  "reviewer1": {
+    "provider": "claudeAgent",
+    "model": "fable",
+    "effort": "high"
+  },
+  "reviewer2": {
+    "provider": "claudeAgent",
+    "model": "sonnet",
+    "effort": "high"
+  },
+  "scout": {
+    "provider": "claudeAgent",
+    "model": "haiku",
+    "effort": "medium"
+  },
+  "researcher": {
+    "provider": "claudeAgent",
+    "model": "opus",
+    "effort": "high"
+  },
+  "adjudicator": {
+    "provider": "claudeAgent",
+    "model": "fable",
+    "effort": "high"
+  }
+}

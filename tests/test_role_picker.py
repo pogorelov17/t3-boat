@@ -44,7 +44,7 @@ class RolePickerTests(unittest.TestCase):
         self.stock = stock / "profiles" / (PROFILE + ".json")
         self.stock.with_name("codex-only.json").write_bytes((ROOT / "profiles/codex-only.json").read_bytes())
         families = {
-            "orchestrator": ("codex", "astra", "high"),
+            "lead": ("codex", "astra", "high"),
             "executor": ("claudeAgent", "opus", "high"),
             "reviewer1": ("claudeAgent", "fable", "high"),
             "reviewer2": ("codex", "astra", "high"),
@@ -102,10 +102,21 @@ class RolePickerTests(unittest.TestCase):
         self.assertIn("gpt-6.2-sol", output)
         self.assertIn("gpt-6.10-sol", output)
 
+    def test_setup_migrates_a_saved_0_1_x_profile(self):
+        self.choose("")
+        rows = json.loads(self.saved.read_text())
+        legacy = {("orchestrator" if role == "lead" else role): row for role, row in rows.items()}
+        self.saved.write_text(json.dumps(legacy))
+        output = self.choose("")
+        self.assertIn("Saved role assignments", output)
+        self.assertEqual(json.loads(self.saved.read_text()), rows)
+        self.assertEqual(list(json.loads(self.saved.read_text())), list(rows))
+        self.assertEqual(json.loads(self.saved.with_name(self.saved.name + ".pre-0.2").read_text()), legacy)
+
     def test_numbered_options_allow_editing_effort_without_changing_model(self):
         self.choose("1", "", "unlisted-model", "", "1", "")
         rows = json.loads(self.saved.read_text())
-        self.assertEqual(rows["orchestrator"], dict(provider="codex", model="gpt-6.2-astra", effort="medium"))
+        self.assertEqual(rows["lead"], dict(provider="codex", model="gpt-6.2-astra", effort="medium"))
 
     def test_unavailable_pin_requires_explicit_replacement_and_abort_preserves_file(self):
         self.choose("")
