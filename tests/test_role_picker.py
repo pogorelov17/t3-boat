@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -120,7 +121,7 @@ class RolePickerTests(unittest.TestCase):
         prompts = []
         with patch("builtins.input", side_effect=lambda prompt: prompts.append(prompt) or ""), \
                 redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(ValueError, str(self.saved)) as raised:
+            with self.assertRaisesRegex(ValueError, re.escape(str(self.saved))) as raised:
                 self.configure(PROFILE)
         self.assertNotIsInstance(raised.exception, UnicodeDecodeError)
         self.assertEqual(prompts, [])

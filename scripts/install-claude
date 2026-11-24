@@ -59,10 +59,16 @@ first() {
 
 if [ -x "$prefix/bin/claude" ]; then
   printed=$("$prefix/bin/claude" --version 2>/dev/null | head -n 1) || printed=
+  cr=$(printf '\r')
+  printed=${printed%"$cr"}
+  spaces=$IFS
+  IFS=$(printf ' \t\n\r.')
+  IFS=${IFS%.}  # A carriage return also separates words.
   set -f
   # shellcheck disable=SC2086
   installed=$(fields "$(first $printed)")
   set +f
+  IFS=$spaces
   if [ -z "$installed" ]; then
     printf '%s\n' "install-claude: warning: unrecognised version '$printed' from $prefix/bin/claude; leaving it unchanged" >&2
     exit 0

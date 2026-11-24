@@ -112,7 +112,10 @@ def profile_lock(target):
             yield real, error.strerror
             return
         for stale in real.parent.glob(glob.escape("." + real.name + TEMPORARY) + "*"):
-            stale.unlink(missing_ok=True)
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass  # Best effort, for example in a read-only directory.
         yield real, None
 
 
@@ -150,12 +153,16 @@ def keep_backup(real, data):
         temporary.unlink(missing_ok=True)
 
 
-def migrated_rows(name, original):
-    """Return the fully migrated rows for a saved 0.1.x profile, or None when it needs no migration."""
+def parse_profile(target, original):
+    """Decode a saved profile's bytes strictly as UTF-8 and parse the text; errors name the file."""
     try:
-        rows = json.loads(original)
-    except ValueError:
-        return None  # Unreadable files are reported by the reader.
+        return json.loads(original.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProfileError(f"{target}: {exc}") from None
+
+
+def migrated_rows(name, rows, original):
+    """Return the fully migrated rows for a saved 0.1.x profile, or None when it needs no migration."""
     if not isinstance(rows, dict) or LEGACY_PARENT not in rows:
         return None
     if PARENT in rows:
@@ -168,32 +175,34 @@ def migrated_rows(name, original):
 
 
 def migrate_locked(target, real, unlocked):
-    """Migrate the profile while holding its lock; returns its bytes after migration and whether it changed."""
+    """Migrate the profile while holding its lock; returns its rows after migration and whether it changed."""
     try:
         original = real.read_bytes()
     except FileNotFoundError:
         return None, False
+    rows = parse_profile(target, original)
     try:
-        rows = migrated_rows(target.name, original)
+        migrated = migrated_rows(target.name, rows, original)
     except ProfileError as exc:
         raise ProfileError(f"{target}: {exc}") from None
-    if rows is None:
-        return original, False
+    if migrated is None:
+        return rows, False
     if unlocked:
         raise ProfileError(f"{target}: needs migration to 0.2 but cannot be locked: {unlocked}")
-    data = (json.dumps(rows, indent=2) + "\n").encode()
+    data = (json.dumps(migrated, indent=2) + "\n").encode()
+    temporary = None
     try:
         keep_backup(real, original)
         temporary = durable_temporary(real, data)
+        os.replace(temporary, real)
     except OSError as error:
         if error.errno not in NO_LOCK:
             raise
         raise ProfileError(f"{target}: needs migration to 0.2 but cannot be written: {error.strerror}") from None
-    try:
-        os.replace(temporary, real)
     finally:
-        temporary.unlink(missing_ok=True)
-    return data, True
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return migrated, True
 
 
 def migrate_profile(target):
@@ -204,11 +213,21 @@ def migrate_profile(target):
         return migrate_locked(target, real, unlocked)[1]
 
 
+def saved_rows(target):
+    """Return a saved profile's rows after every 0.1.x migration, or None when there is none."""
+    if not target.is_file():
+        return None
+    with profile_lock(target) as (real, unlocked):
+        return migrate_locked(target, real, unlocked)[0]
+
+
 def save_profile(target, rows):
     with profile_lock(target) as (real, unlocked):
         data = (json.dumps(rows, indent=2) + "\n").encode()
         if real.exists() and real.read_bytes() == data:
             return
+        if unlocked:
+            raise ProfileError(f"{target}: cannot be saved without its lock: {unlocked}")
         temporary = durable_temporary(real, data)
         try:
             os.replace(temporary, real)
@@ -222,12 +241,12 @@ def read_profile(name):
     if not target.is_file():
         raise ProfileError("Select role models with t3-boat setup first")
     with profile_lock(target) as (real, unlocked):
-        data = migrate_locked(target, real, unlocked)[0]
+        rows = migrate_locked(target, real, unlocked)[0]
+    if rows is None:
+        raise ProfileError(f"{target}: the file disappeared while it was read")
     try:
-        if data is None:
-            raise ProfileError("the file disappeared while it was read")
-        return validate_profile(name, json.loads(data.decode()))
-    except ValueError as exc:
+        return validate_profile(name, rows)
+    except ProfileError as exc:  # Anything else is a defect and keeps its traceback.
         raise ProfileError(f"{target}: {exc}") from exc
 
 
@@ -254,9 +273,10 @@ def prepare(name, rows=None):
         rows = read_profile(name)
     enabled = PROVIDERS[name]
     settings_path = Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
+    raw = settings_path.read_bytes() if settings_path.exists() else b"{}"
     try:
-        settings = json.loads(settings_path.read_bytes().decode()) if settings_path.exists() else {}
-    except ValueError as exc:
+        settings = json.loads(raw.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProfileError(f"{settings_path}: {exc}") from None
     if not isinstance(settings, dict):
         raise ProfileError(f"{settings_path}: expected a JSON object")
