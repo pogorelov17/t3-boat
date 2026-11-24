@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from role_profile import PARENT, migrate_profile, read_profile, write
+from role_profile import PARENT, read_profile, saved_rows, write
 from role_picker import configure_roles
 
 PROFILES = {
@@ -171,14 +171,14 @@ def bind_project(slug, label):
 def parent_role(profile):
     path = Path.home() / "profiles" / (profile + ".json")
     try:
-        migrate_profile(path)
+        rows = saved_rows(path)
     except ValueError as error:  # The message names the file, for example when both parent keys are present.
         raise ProfileError(str(error)) from None
     except OSError as error:
         raise ProfileError(f"{path}: {error}") from None
     try:
-        return json.loads(path.read_text())[PARENT]
-    except (OSError, KeyError, TypeError, ValueError):
+        return rows[PARENT]
+    except (KeyError, TypeError):
         raise SetupError("The global role profile could not be read. Check docker logs t3-boat.") from None
 
 
@@ -208,6 +208,8 @@ def project_binding(git_dir):
 def setup(profile, providers):
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
+    # Name an unreadable saved profile before installing anything or asking for a sign-in.
+    saved_rows(Path.home() / "profiles" / (profile + ".json"))
     for provider in providers:
         if provider == "claude":
             run("install-claude")

@@ -25,6 +25,7 @@ REQUIRED = (PARENT, "executor", "reviewer1", "reviewer2", "scout", "researcher",
 OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
 CODEX_SOL = re.compile(r"gpt-[0-9]+(?:\.[0-9]+)*-sol(?:-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?")
 STOCK_0_1_0 = "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"  # claude-only.json
+MISSING = object()  # A saved profile that does not exist, as opposed to one holding JSON null.
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
 
@@ -179,7 +180,7 @@ def migrate_locked(target, real, unlocked):
     try:
         original = real.read_bytes()
     except FileNotFoundError:
-        return None, False
+        return MISSING, False
     rows = parse_profile(target, original)
     try:
         migrated = migrated_rows(target.name, rows, original)
@@ -213,12 +214,13 @@ def migrate_profile(target):
         return migrate_locked(target, real, unlocked)[1]
 
 
-def saved_rows(target):
-    """Return a saved profile's rows after every 0.1.x migration, or None when there is none."""
+def saved_rows(target, missing=None):
+    """Return a saved profile's rows after every 0.1.x migration, or `missing` when there is none."""
     if not target.is_file():
-        return None
+        return missing
     with profile_lock(target) as (real, unlocked):
-        return migrate_locked(target, real, unlocked)[0]
+        rows = migrate_locked(target, real, unlocked)[0]
+    return missing if rows is MISSING else rows
 
 
 def save_profile(target, rows):
@@ -242,7 +244,7 @@ def read_profile(name):
         raise ProfileError("Select role models with t3-boat setup first")
     with profile_lock(target) as (real, unlocked):
         rows = migrate_locked(target, real, unlocked)[0]
-    if rows is None:
+    if rows is MISSING or rows is None:
         raise ProfileError(f"{target}: the file disappeared while it was read")
     try:
         return validate_profile(name, rows)

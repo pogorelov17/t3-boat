@@ -470,7 +470,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_status_reports_migration_io_errors(self):
         legacy_roles(self.home, "codex-only")
-        with patch.object(cli, "migrate_profile", side_effect=PermissionError(13, "Permission denied", "/x/lockfile")):
+        with patch.object(cli, "saved_rows", side_effect=PermissionError(13, "Permission denied", "/x/lockfile")):
             code, report = self.status_report()
         self.assertEqual(code, 1)
         self.assertIn("[missing] Global profile codex-only applied", report)

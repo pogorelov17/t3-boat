@@ -61,9 +61,11 @@ if [ -x "$prefix/bin/claude" ]; then
   printed=$("$prefix/bin/claude" --version 2>/dev/null | head -n 1) || printed=
   cr=$(printf '\r')
   printed=${printed%"$cr"}
+  # Carriage returns, vertical tabs and form feeds separate words like spaces.
+  printed=$(printf '%s' "$printed" | tr '\r\v\f' '   ')
   spaces=$IFS
-  IFS=$(printf ' \t\n\r.')
-  IFS=${IFS%.}  # A carriage return also separates words.
+  IFS=$(printf ' \t\n.')
+  IFS=${IFS%.}
   set -f
   # shellcheck disable=SC2086
   installed=$(fields "$(first $printed)")
