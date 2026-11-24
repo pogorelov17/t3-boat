@@ -476,6 +476,7 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("/x/lockfile", report)
 
     def read_only_profiles(self):
+        (self.profiles / "active").write_text("codex-only\n")  # written by an earlier start
         self.profiles.chmod(0o555)
         self.addCleanup(self.profiles.chmod, 0o755)
         if os.access(self.profiles, os.W_OK):

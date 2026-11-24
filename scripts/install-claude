@@ -5,41 +5,77 @@ set -eu
 version=2.1.330
 prefix="$HOME/.local"
 
+# Succeed when $1 is dot-separated non-empty identifiers of letters, digits and hyphens.
+identifiers() {
+  case "$1" in
+    '' | .* | *. | *..* | *[!0-9A-Za-z.-]*) return 1 ;;
+  esac
+}
+
 # Print "MAJOR MINOR PATCH PRE" for [v]MAJOR.MINOR.PATCH[-pre][+build], or nothing.
 fields() {
   word=${1#v}
   core=${word%%[-+]*}
   case "$core" in
-    *[!0-9.]* | .* | *. | *..* | *.*.*.* | *[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) return ;;
+    *[!0-9.]* | .* | *. | *..* | *.*.*.*) return 0 ;;
     *.*.*) ;;
-    *) return ;;
+    *) return 0 ;;
   esac
-  case "${word#"$core"}" in
-    '' | +?*) pre= ;;
-    -?*) pre=yes ;;
-    *) return ;;
+  suffix=${word#"$core"}
+  pre=no
+  case "$suffix" in
+    -*)
+      label=${suffix#-}
+      label=${label%%+*}
+      identifiers "$label" || return 0
+      pre=yes
+      suffix=${suffix#-"$label"} ;;
+  esac
+  case "$suffix" in
+    '') ;;
+    +*) identifiers "${suffix#+}" || return 0 ;;
+    *) return 0 ;;
   esac
   major=${core%%.*}
   rest=${core#*.}
-  echo "${major} ${rest%%.*} ${rest#*.} ${pre:-no}"
+  printf '%s\n' "$major ${rest%%.*} ${rest#*.} $pre"
+}
+
+# Succeed when the digit string $1 is smaller than $2, whatever their length.
+smaller() {
+  a=${1#"${1%%[!0]*}"}
+  b=${2#"${2%%[!0]*}"}
+  if [ "${#a}" -ne "${#b}" ]; then
+    [ "${#a}" -lt "${#b}" ]
+    return
+  fi
+  [ "$a" != "$b" ] && [ "$(printf '%s\n%s\n' "$a" "$b" | LC_ALL=C sort | head -n 1)" = "$a" ]
+}
+
+# The first whitespace-delimited word of $*.
+first() {
+  printf '%s' "${1-}"
 }
 
 if [ -x "$prefix/bin/claude" ]; then
   printed=$("$prefix/bin/claude" --version 2>/dev/null | head -n 1) || printed=
-  installed=$(fields "${printed%% *}")
+  set -f
+  # shellcheck disable=SC2086
+  installed=$(fields "$(first $printed)")
+  set +f
   if [ -z "$installed" ]; then
-    echo "install-claude: warning: unrecognised version '$printed' from $prefix/bin/claude; leaving it unchanged" >&2
+    printf '%s\n' "install-claude: warning: unrecognised version '$printed' from $prefix/bin/claude; leaving it unchanged" >&2
     exit 0
   fi
   # shellcheck disable=SC2086
   set -- $installed $(fields "$version")
   # Keep the installed version unless it is older than the pinned one.
-  if [ "$1" -ne "$5" ]; then
-    [ "$1" -lt "$5" ] || exit 0
-  elif [ "$2" -ne "$6" ]; then
-    [ "$2" -lt "$6" ] || exit 0
-  elif [ "$3" -ne "$7" ]; then
-    [ "$3" -lt "$7" ] || exit 0
+  if smaller "$1" "$5"; then :
+  elif smaller "$5" "$1"; then exit 0
+  elif smaller "$2" "$6"; then :
+  elif smaller "$6" "$2"; then exit 0
+  elif smaller "$3" "$7"; then :
+  elif smaller "$7" "$3"; then exit 0
   elif [ "$4" = no ]; then
     exit 0  # A pre-release of the pinned version is older than the release.
   fi

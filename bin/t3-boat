@@ -174,8 +174,8 @@ def parent_role(profile):
         migrate_profile(path)
     except ValueError as error:  # The message names the file, for example when both parent keys are present.
         raise ProfileError(str(error)) from None
-    except OSError:
-        pass  # Reported as unreadable below.
+    except OSError as error:
+        raise ProfileError(f"{path}: {error}") from None
     try:
         return json.loads(path.read_text())[PARENT]
     except (OSError, KeyError, TypeError, ValueError):
@@ -348,8 +348,9 @@ def main():
         result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/role_profile.py"), profile],
                                 stderr=subprocess.PIPE, text=True)
         if result.returncode:
-            detail = (result.stderr.strip().splitlines() or [""])[-1]
+            *earlier, detail = result.stderr.rstrip("\n").split("\n")
             if detail.startswith("T3 Boat profile:"):
+                sys.stderr.write("".join(line + "\n" for line in earlier))
                 sys.exit(f"{detail.rstrip('.')}. Next: repair the named file in the t3-boat-data volume, then restart the container.")
             sys.stderr.write(result.stderr)
             sys.exit(result.returncode)
