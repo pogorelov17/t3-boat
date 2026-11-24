@@ -171,5 +171,21 @@ class InstallClaudeTests(unittest.TestCase):
         self.assertIsNotNone(self.install())
 
 
+    def test_other_whitespace_around_the_version_token(self):
+        major, minor, patch = map(int, PINNED.split("."))
+        older = f"{major}.{minor}.{patch - 1}"
+        for output in (f"\r{older}\n", f"{older}\v(Claude Code)\n", f"{older}\f(Claude Code)\n",
+                       f"\r{older}\r\n", f" \f\v{older}\t\r(Claude Code)\r\n"):
+            with self.subTest(output=output):
+                fake_claude(self.claude, None, output)
+                self.assertIsNotNone(self.install(), self.stderr)
+                self.assertEqual(self.stderr, "")
+        for output in (f"\r{PINNED}\n", f"{PINNED}\v(Claude Code)\n", f"{PINNED}\f(Claude Code)\n"):
+            with self.subTest(output=output):
+                fake_claude(self.claude, None, output)
+                self.assertIsNone(self.install(), self.stderr)
+                self.assertEqual(self.stderr, "")
+
+
 if __name__ == "__main__":
     unittest.main()

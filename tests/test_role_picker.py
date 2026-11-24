@@ -192,5 +192,19 @@ class RolePickerTests(unittest.TestCase):
         self.assertEqual(rows["reviewer1"]["model"], "claude-fable-5-2")
 
 
+    def test_a_saved_null_is_named_and_left_unchanged(self):
+        self.saved.parent.mkdir(parents=True, exist_ok=True)
+        self.saved.write_text("null\n")
+        before = self.saved.read_bytes()
+        prompts = []
+        with patch("builtins.input", side_effect=lambda prompt: prompts.append(prompt) or ""), \
+                redirect_stdout(io.StringIO()) as output:
+            with self.assertRaisesRegex(ValueError, re.escape(str(self.saved))):
+                self.configure(PROFILE)
+        self.assertEqual(prompts, [])
+        self.assertNotIn("Suggested role assignments", output.getvalue())
+        self.assertEqual(self.saved.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

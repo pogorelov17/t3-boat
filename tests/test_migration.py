@@ -2,6 +2,7 @@
 import errno
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -843,6 +844,86 @@ class MigrationTests(unittest.TestCase):
         result = self.prepare("codex-only", check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(settings.read_text())["providerInstances"]["custom"], 7)
+
+
+    # Repair round 4.
+
+    def test_status_reads_a_non_ascii_profile_in_the_c_locale(self):
+        profile = "codex-only"
+        rows = seeded_roles(self.home, profile)
+        rows["executor"]["note"] = "caf\u00e9"
+        self.saved(profile).write_bytes((json.dumps(rows, indent=2, ensure_ascii=False) + "\n").encode())
+        self.prepare(profile)
+        script = (
+            "import sys\n"
+            "from importlib.machinery import SourceFileLoader\n"
+            "from unittest.mock import patch\n"
+            "cli = SourceFileLoader('cli', sys.argv[1]).load_module()\n"
+            "print('parent', cli.parent_role(sys.argv[2])['model'])\n"
+            "with patch.object(cli, 't3_online', return_value=True), patch.object(cli, 'probe', return_value=None), \\\n"
+            "        patch.object(cli, 'logged_in', return_value=True), patch.object(cli, 'projects', return_value=[]):\n"
+            "    cli.status(sys.argv[2], cli.PROFILES[sys.argv[2]])\n"
+        )
+        env = dict(self.env, LC_ALL="C", PYTHONUTF8="0")
+        result = subprocess.run([sys.executable, "-c", script, str(ROOT / "bin/t3-boat"), profile],
+                                env=env, capture_output=True, text=True, timeout=60)
+        self.assertIn(f"parent {rows['lead']['model']}", result.stdout, result.stderr)
+        self.assertIn(f"[ok] Global profile {profile} applied", result.stdout, result.stderr)
+
+    def test_setup_names_an_unreadable_profile_before_installing_or_signing_in(self):
+        profile = "codex+claude"
+        path = self.saved(profile)
+        path.write_bytes(b'{"lead": "\xff"}\n')
+        before = path.read_bytes()
+        output = StringIO()
+        prompts = []
+        with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "run") as run, \
+                patch.object(cli, "probe", return_value=None) as probe, \
+                patch.object(cli, "logged_in", return_value=False), \
+                patch.object(sys.modules["role_picker"], "catalog", return_value={}), \
+                patch("builtins.input", side_effect=lambda prompt: prompts.append(prompt) or ""), \
+                redirect_stdout(output):
+            with self.assertRaisesRegex(ValueError, re.escape(str(path))) as raised:
+                cli.setup(profile, cli.PROFILES[profile])
+        self.assertNotIsInstance(raised.exception, UnicodeDecodeError)
+        self.assertEqual(len(str(raised.exception).splitlines()), 1)
+        self.assertEqual(run.call_args_list, [])
+        self.assertEqual(probe.call_args_list, [])
+        self.assertNotIn("Sign in", output.getvalue())
+        self.assertEqual(prompts, [])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_main_setup_exits_non_zero_naming_an_unreadable_profile(self):
+        path = self.saved("claude-only")
+        path.write_bytes(b'{"lead": "\xff"}\n')
+        tools = self.home / "tools"
+        tools.mkdir()
+        for name in ("install-claude", "claude", "codex"):
+            tool = tools / name
+            tool.write_text('#!/bin/sh\necho "$0 $*" >> "$HOME/invoked"\nexit 1\n')
+            tool.chmod(0o755)
+        script = (
+            "import sys\n"
+            "from importlib.machinery import SourceFileLoader\n"
+            "from unittest.mock import patch\n"
+            "sys.argv = [sys.argv[1], 'setup']\n"
+            "cli = SourceFileLoader('__main__', sys.argv[0])\n"
+            "import urllib.request, io, json\n"
+            "class Online(io.BytesIO):\n"
+            "    def __enter__(self): return self\n"
+            "    def __exit__(self, *a): return False\n"
+            "with patch('urllib.request.urlopen', return_value=Online(json.dumps({'environmentId': 'e'}).encode())):\n"
+            "    cli.load_module()\n"
+        )
+        env = dict(self.env, T3_BOAT_PROFILE="claude-only", PATH=os.pathsep.join([str(tools), self.env["PATH"]]))
+        result = subprocess.run([sys.executable, "-c", script, str(ROOT / "bin/t3-boat")], env=env,
+                                capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(str(path), result.stderr.splitlines()[0])
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("Sign in", result.stdout)
+        self.assertFalse((self.home / "invoked").exists(), (self.home / "invoked").read_text()
+                         if (self.home / "invoked").exists() else "")
 
 
 class WorkerStartTests(unittest.TestCase):
