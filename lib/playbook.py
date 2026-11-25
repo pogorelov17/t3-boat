@@ -165,6 +165,29 @@ def rules(name):
                     yield key, other, exceptions.get((key, other_role))
 
 
+def rule_lines(name):
+    """The model rules of a set as Markdown list items, for the installed workflow skill."""
+    lines = []
+    for rule in manifest().get("model_rules", []):
+        rows = [f"`{key}`" for role in rule["roles"] for key in keys(role)]
+        listed = rows[0] if len(rows) == 1 else ", ".join(rows[:-1]) + " and " + rows[-1]
+        other = " or ".join(f"`{key}`" for key in keys(rule["must_differ_from"]))
+        lines.append(f"- {listed} run on a model other than the {other} model and other than every model that "
+                     "authored commits on the PR in any round. A model is its provider plus family; a different "
+                     "effort does not make it a different model.")
+    exceptions = []
+    for exception in model_set(name).get("exceptions", []):
+        role, number = exception.get("role"), exception.get("instance")
+        if role in manifest()["roles"] and isinstance(number, int) and 1 <= number <= len(keys(role)):
+            family = _entries(name, role)[number - 1]["family"].strip()
+            reason = exception.get("reason")
+            exceptions.append(f"- The only exception, declared by `{name}`: `{keys(role)[number - 1]}` may use the "
+                              f"{family} family of `{exception.get('must_differ_from')}` at a different effort, on "
+                              "its own fresh VM."
+                              + (f" Reason: {reason}" if isinstance(reason, str) else ""))
+    return lines + (exceptions or [f"- `{name}` declares no exception."])
+
+
 @lru_cache(maxsize=None)
 def bundle(role):
     """The role's instruction text, assembled as the playbook's own `check.py --print` does."""

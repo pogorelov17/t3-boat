@@ -38,7 +38,7 @@ flowchart TD
     pr --> reviewer2
     reviewer1 -->|verdict| lead
     reviewer2 -->|verdict| lead
-    lead -.->|conflicting verdicts| arbiter
+    lead -.->|conflicting verdicts or a disputed finding| arbiter
     arbiter -.->|ruling| lead
     lead -->|PR, tests and both verdicts| owner
     owner ==>|you merge| pr
@@ -57,7 +57,7 @@ flowchart TD
 
 1. **T3 coordinates the work.** The team lead uses your installation’s role profile to choose the executor and reviewers. New chats in all your projects inherit those model and reasoning settings. While you are still discussing an idea, the conversation stays in T3 until there is a task for a worker.
 2. **Boat runs the code.** The executor checks out the repository on a disposable VM, reproduces the failure, tests the fix and opens a draft PR. Dependencies, builds and test runs stay on Boat, so your machine only hosts T3 and its history.
-3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit, and each sends its verdict to the team lead independently. The first reviewer always uses a different model from the executor. If a fix is needed, a fresh executor updates the same PR and both reviewers check the new commit. When the verdicts conflict, the arbiter rules before any repair.
+3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit, and each sends its verdict to the team lead independently. Both reviewers and the arbiter use a model whose provider and family differ from the executor’s (see [Roles and models](#roles-and-models) for the one `codex-only` exception). When the verdicts conflict, the executor disputes a finding, or two repairs have failed, the arbiter rules on that commit before any repair. If a fix is needed, a fresh executor updates the same PR and two fresh reviewers check the new commit.
 4. **You decide when to merge.** The parent chat collects links to the agents, the test results, both verdicts and the PR. Once a worker’s result is recorded, its VM is deleted. You can come back to the chat or ask for another change on the PR without keeping workers running.
 
 ## Quick start
@@ -159,7 +159,7 @@ The roles, their suggested models and the rules between them come from [agent-pl
 
 On first setup, T3 + Boat picks the newest stable release of each family that T3 lists and that supports the suggested reasoning level. You see the exact model IDs before you accept them. Your choices apply to new chats in all projects on this machine.
 
-Setup enforces the playbook’s model rules: both reviewers and the arbiter use a different model from the executor. A model set can declare an exception. In `codex-only`, the second reviewer may share the executor’s Sol model, and by default both use the newest Sol that supports both reasoning levels; that reviewer still starts a separate read-only session on a fresh VM and reviews the same commit as the first.
+Setup enforces the playbook’s model rules. A model is its provider plus family, and a different reasoning level does not make it a different model: both reviewers and the arbiter must use a provider or family other than the executor’s. The only exception is the one `codex-only` declares: the second reviewer may use the executor’s Sol family at a different reasoning level, because Codex alone has too few families for two reviewers and an arbiter. By default both then use the newest Sol that supports both reasoning levels. That reviewer still starts a separate read-only session on a fresh VM and reviews the same commit as the first. Setup refuses any other shared family, and the same family at the same reasoning level. The team lead’s workflow skill lists these rules for the active profile and checks them again against every model that authored commits on the PR.
 
 **Change your choices later.** Run `docker exec -it t3-boat t3-boat setup` again. Setup keeps your saved versions until you edit a role or type `refresh` to return to the current family defaults. Roles you added yourself are kept. If a model or reasoning level is no longer available, choose a replacement before continuing.
 
@@ -170,10 +170,10 @@ The playbook also contains a role guide for each role: its instructions, its own
 If you answer **yes**:
 
 - On this machine, every role guide becomes a skill named `agent-playbook-ROLE` for each enabled provider, in `/data/.codex/skills/` and `/data/.claude/skills/`. They apply to every project here. Nothing is added to your repositories.
-- The team lead is told to follow `agent-playbook-lead`, and its workflow skill lists the installed guides.
-- Each worker started with `boat-worker start ROLE` receives its own role’s guide in its provider’s global instruction file on its VM (`~/.codex/AGENTS.md` for Codex, `~/.claude/CLAUDE.md` for Claude), so the guide is loaded before the worker does anything.
+- The team lead is told to follow `agent-playbook-lead`, and its workflow skill lists the installed guides. It is pointed only to guide files that exist.
+- Each worker started with `boat-worker start ROLE` receives its own role’s guide in its provider’s global instruction file on its VM (`~/.codex/AGENTS.md` for Codex, `~/.claude/CLAUDE.md` for Claude), so the guide is loaded before the worker does anything. Codex reads a non-empty `~/.codex/AGENTS.override.md` instead of `AGENTS.md`. If the Boat environment provides one, the worker start stops with a message naming it and deletes the VM, so a worker never runs without its guide.
 
-If you answer **no**, or setup runs without a terminal, nothing is installed and guides installed earlier are removed. Without a terminal, setup keeps your previous answer and says so. Setup writes only files it generated itself, which carry a `t3-boat: generated from agent-playbook` line. A file you created at the same path is never replaced, and files you add to a skill folder stay there. Each container start refreshes the generated files from the pinned playbook and leaves unchanged files alone. To keep your own edits to a generated guide, delete its marker line.
+If you answer **no**, nothing is installed and guides installed earlier are removed. Press **Enter** to keep your saved answer; before you have answered, the default is no. Setup without a terminal asks nothing and keeps the saved answer, which is no until you answer yes in a terminal; it prints which one applies. Setup writes only files it generated itself, which carry a `t3-boat: generated from agent-playbook` line. A file you created at the same path is never replaced and is used as that role’s guide. If something else occupies the path, such as a file named like the skill folder, that guide is not installed, the team lead is not pointed to it, and setup and the container log say so. Files you add to a skill folder stay there. Each container start refreshes the generated files from the pinned playbook and leaves unchanged files alone. To keep your own edits to a generated guide, delete its marker line.
 
 <details>
 <summary><strong>Keep your history when updating</strong></summary>

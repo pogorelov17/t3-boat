@@ -212,9 +212,12 @@ def project_binding(git_dir):
 def choose_playbook(providers):
     """Ask whether to install the agent-playbook skills on this machine; the answer is saved."""
     current = playbook_skills.chosen(Path.home())
+    saved = playbook_skills.state_path(Path.home()).exists()
     state = "installed" if current else "not installed"
+    keep = f"your saved answer ({'yes' if current else 'no'})" if saved else "the default (no)"
     if not sys.stdin.isatty():
-        print(f"Agent-playbook skills: {state}. Run setup in a terminal to change this.")
+        print(f"Agent-playbook skills: {state}, {keep}. Setup without a terminal asks nothing and keeps it; "
+              "run setup in a terminal to change it.")
         return
     homes = {"codex": os.environ.get("CODEX_HOME") or Path.home() / ".codex",
              "claude": os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"}
@@ -225,12 +228,13 @@ def choose_playbook(providers):
         print(f"  {provider}: {Path(homes[provider]) / 'skills' / (playbook_skills.PREFIX + 'ROLE') / 'SKILL.md'}")
     print("Each Boat worker VM also receives its own role's guide in its provider instruction file "
           "(~/.codex/AGENTS.md or ~/.claude/CLAUDE.md on the VM). Files you created yourself are never replaced.")
+    print(f"Press Enter to keep {keep}.")
     while True:
-        answer = input(f"Install the agent-playbook skills on this machine? [{'Y/n' if current else 'y/N'}] ").strip().lower()
-        if answer in ("", "y", "yes", "n", "no"):
+        reply = input(f"Install the agent-playbook skills on this machine? [{'Y/n' if current else 'y/N'}] ").strip().lower()
+        if reply in ("", "y", "yes", "n", "no"):
             break
         print("Answer y or n.")
-    install = answer in ("y", "yes") or (not answer and current)
+    install = reply in ("y", "yes") or (not reply and current)
     write(playbook_skills.state_path(Path.home()), "yes\n" if install else "no\n")
     print("Agent-playbook skills will be installed." if install else
           "Agent-playbook skills are not installed. Rerun setup to add them later.")

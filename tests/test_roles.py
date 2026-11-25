@@ -66,7 +66,7 @@ class RoleTests(unittest.TestCase):
                         for role, row in roles.items():
                             self.assertIn(f"| {role} | {row['provider']} | {row['model']} |", installed)
 
-    def test_codex_only_second_reviewer_can_share_the_executor_sol_at_any_effort(self):
+    def test_codex_only_second_reviewer_can_share_the_executor_sol_only_at_another_effort(self):
         path = self.home / "profiles/codex-only.json"
         path.parent.mkdir(exist_ok=True)
         rows = seeded_roles(self.home, "codex-only")
@@ -81,7 +81,11 @@ class RoleTests(unittest.TestCase):
                 rows["reviewer2"] = dict(rows["executor"], effort=effort)
                 path.write_text(json.dumps(rows))
                 result = self.prepare("codex-only", check=False)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                if effort == "medium":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("reviewer2", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(path.read_text()), rows)
 
     def test_other_reviews_require_a_different_author_model(self):

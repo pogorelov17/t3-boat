@@ -5,6 +5,7 @@ it needs. On this machine every guide becomes a skill for each enabled provider.
 the guide of its own role in its provider's instruction file (see boat-worker).
 """
 import json
+import os
 from pathlib import Path
 
 import playbook
@@ -30,9 +31,17 @@ def skill_path(base, role):
     return Path(base) / "skills" / (PREFIX + role) / "SKILL.md"
 
 
+def description(role):
+    """When a provider should load the guide: the role's rows, its own summary and what the guide holds."""
+    rows = " or ".join(f"`{key}`" for key in playbook.keys(role))
+    use = ("Load before you clarify, plan, brief workers or report a delivery as the T3 Boat team lead (`lead`)."
+           if role == "lead" else f"Load when a task assigns you the {role} role (profile row {rows}).")
+    return (f"agent-playbook {role} role guide: who the {role} is, what it receives and delivers, its rules and "
+            f"report format, with its skills. {use} {playbook.summary(role)}").strip()
+
+
 def skill_text(role):
-    description = f"agent-playbook role guide for the {role}. {playbook.summary(role)}".strip()
-    return (f"---\nname: {PREFIX}{role}\ndescription: {json.dumps(description)}\n---\n\n"
+    return (f"---\nname: {PREFIX}{role}\ndescription: {json.dumps(description(role))}\n---\n\n"
             f"{MARK} {playbook.commit()}. t3-boat replaces this file; delete this line to keep your edits. -->\n\n"
             + playbook.bundle(role))
 
@@ -45,26 +54,41 @@ def generated(path):
         return False
 
 
+def obstacle(base, path):
+    """The path that keeps a guide from being written or read: a non-directory where a folder goes, or
+    something other than a readable file at the guide's own path. None when nothing is in the way."""
+    for folder in (Path(base) / "skills", path.parent):
+        if (folder.exists() or folder.is_symlink()) and not folder.is_dir():
+            return folder
+    if path.exists() and (not path.is_file() or not os.access(path, os.R_OK)):
+        return path
+    return None
+
+
 def plan(home, bases, enabled):
-    """Return (files to write, generated files to remove, kept custom files).
+    """Return (files to write, generated files to remove, kept custom files, blocked guides).
 
     `bases` maps each provider instance to its configuration directory; `enabled` lists the active ones.
+    Kept files are regular files the owner made at a guide path. Blocked guides are (guide path, obstacle)
+    pairs where something else occupies the path; they are neither written nor named to the team lead.
     """
     install = chosen(home)
     roles = set(playbook.roles()) if install else set()
-    writes, removals, kept = {}, [], []
+    writes, removals, kept, blocked = {}, [], [], []
     for provider, base in bases.items():
         wanted = roles if provider in enabled else set()
         for role in sorted(wanted):
             path = skill_path(base, role)
-            if (path.exists() and not generated(path)) or (path.parent.exists() and not path.parent.is_dir()):
+            if (found := obstacle(base, path)) is not None:
+                blocked.append((path, found))
+            elif path.is_file() and not generated(path):
                 kept.append(path)
             else:
                 writes[path] = skill_text(role)
         for path in sorted((Path(base) / "skills").glob(PREFIX + "*/SKILL.md")):
             if path.parent.name.removeprefix(PREFIX) not in wanted and generated(path):
                 removals.append(path)
-    return writes, removals, kept
+    return writes, removals, kept, blocked
 
 
 def remove(paths):
@@ -79,7 +103,7 @@ def remove(paths):
 def lead_note(base, installed):
     """The sentence pointing the team lead to its own guide, or an empty string.
 
-    `installed` holds the guide paths this run writes or finds kept by the owner.
+    `installed` holds the guide files this run writes or keeps for the owner; a blocked path is never in it.
     """
     path = skill_path(base, "lead")
     if path not in installed:
