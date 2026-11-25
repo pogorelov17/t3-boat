@@ -236,8 +236,6 @@ def verify(environment, slug=None):
 
 def start(role_name):
     profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
-    if role_name == "orchestrator":
-        raise ValueError(f"The orchestrator role is now `{PARENT}`, the parent chat. Select a child role from the active profile")
     roles = read_profile(profile)
     if role_name == PARENT or role_name not in roles:
         raise ValueError("Select a child role from the active profile")

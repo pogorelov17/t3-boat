@@ -129,9 +129,7 @@ The first reviewer and the adjudicator use a different model from the executor. 
 
 Finish active jobs and back up the named volume privately. Stop and remove the old container, then repeat the start command with the new image tag, the same profile, and the same `t3-boat-data` volume. It holds chat history, project bindings, role settings, and account logins.
 
-The stock Claude profile from 0.1.0 upgrades automatically. If you customized that profile, assign reviewer and adjudicator models distinct from the executor before upgrading.
-
-**Upgrading from 0.1.x.** The parent role formerly called `orchestrator` is now `lead`. Saved role profiles are migrated automatically when the container starts, and the original file is kept next to it as `profiles/PROFILE.json.pre-0.2`. If the profile is a symbolic link, the link is kept and the file it points to is migrated, with the backup beside that file. A profile that lists both `orchestrator` and `lead` stops the start with a message naming the file; keep only `lead`. A profile that would not be valid after the rename (for example, one with a missing role or a provider outside the profile) is left unchanged, without a backup, and the start and `t3-boat setup` stop with a one-line message naming the file. The same happens when the profile cannot be read, for example because of its permissions, or when a directory occupies its path; setup stops before it installs anything or asks you to sign in. The rename also makes the saved VM-check receipts stale, so `t3-boat status` asks for `t3-boat setup` once after the upgrade.
+**From 0.1.x to 0.2.** Keeping the volume does not work for this update. 0.2 needs a fresh installation: the parent role formerly called `orchestrator` is now `lead`, and 0.1.x role profiles are not converted. Start 0.2 on a new volume, for example `-v t3-boat-data-0.2:/data`, and run setup. Leave the 0.1.x volume as it is to keep its chat history or to go back to 0.1.x. A 0.2 container started on a 0.1.x volume stops with a one-line message naming the role profile and leaves the file unchanged.
 
 </details>
 

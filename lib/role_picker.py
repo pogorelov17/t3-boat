@@ -69,7 +69,7 @@ def assignment(row):
 
 
 def saved_assignments(saved):
-    """Return a saved profile's rows after migration, or MISSING; a file the picker cannot show names itself."""
+    """Return a saved profile's rows, or MISSING; a file the picker cannot show names itself."""
     rows = saved_rows(saved, missing=MISSING)
     if rows is MISSING:
         return rows
