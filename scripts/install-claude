@@ -57,8 +57,10 @@ first() {
   printf '%s' "${1-}"
 }
 
-if [ -x "$prefix/bin/claude" ]; then
-  printed=$("$prefix/bin/claude" --version 2>/dev/null | head -n 1) || printed=
+# Succeed when the installed executable answers --version successfully with a first word.
+answers() {
+  output=$("$prefix/bin/claude" --version 2>/dev/null) || return 1
+  printed=$(printf '%s\n' "$output" | head -n 1)
   cr=$(printf '\r')
   printed=${printed%"$cr"}
   # Carriage returns, vertical tabs and form feeds separate words like spaces.
@@ -68,9 +70,14 @@ if [ -x "$prefix/bin/claude" ]; then
   IFS=${IFS%.}
   set -f
   # shellcheck disable=SC2086
-  installed=$(fields "$(first $printed)")
+  word=$(first $printed)
   set +f
   IFS=$spaces
+  [ -n "$word" ]
+}
+
+if [ -x "$prefix/bin/claude" ] && answers; then
+  installed=$(fields "$word")
   if [ -z "$installed" ]; then
     printf '%s\n' "install-claude: warning: unrecognised version '$printed' from $prefix/bin/claude; leaving it unchanged" >&2
     exit 0
@@ -87,6 +94,11 @@ if [ -x "$prefix/bin/claude" ]; then
   elif [ "$4" = no ]; then
     exit 0  # A pre-release of the pinned version is older than the release.
   fi
+elif [ -e "$prefix/bin/claude" ] || [ -L "$prefix/bin/claude" ]; then
+  # A failing or silent --version means a broken installation. npm refuses to replace
+  # a command it did not create, so remove this installer's own entry point first.
+  printf '%s\n' "install-claude: $prefix/bin/claude --version failed or printed nothing; reinstalling $version" >&2
+  rm -f "$prefix/bin/claude"
 fi
 npm install --global --prefix "$prefix" --no-fund --no-audit "@anthropic-ai/claude-code@$version"
 "$prefix/bin/claude" --version

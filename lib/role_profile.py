@@ -8,6 +8,7 @@ import json
 import hashlib
 import os
 import re
+import stat
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -160,6 +161,20 @@ def keep_backup(real, data):
         temporary.unlink(missing_ok=True)
 
 
+def profile_present(target):
+    """Return whether a saved profile exists; anything there that cannot be read as a file names itself."""
+    try:
+        mode = os.stat(target).st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ProfileError(f"{target}: {error.strerror or error}") from None
+    if not stat.S_ISREG(mode):
+        kind = "a directory" if stat.S_ISDIR(mode) else "not a regular file"
+        raise ProfileError(f"{target}: is {kind}; expected a JSON file of roles")
+    return True
+
+
 def parse_profile(target, original):
     """Decode a saved profile's bytes strictly as UTF-8 and parse the text; errors name the file."""
     try:
@@ -187,6 +202,8 @@ def migrate_locked(target, real, unlocked):
         original = real.read_bytes()
     except FileNotFoundError:
         return MISSING, False
+    except OSError as error:  # For example, a file the container user may not read.
+        raise ProfileError(f"{target}: cannot be read: {error.strerror or error}") from None
     rows = parse_profile(target, original)
     try:
         migrated = migrated_rows(target.name, rows, original)
@@ -218,7 +235,7 @@ def migrate_locked(target, real, unlocked):
 
 def migrate_profile(target):
     """Apply every 0.1.x migration to a saved profile in one atomic replacement, keeping a backup."""
-    if not target.is_file():
+    if not profile_present(target):
         return False  # Missing files are reported by the reader.
     with profile_lock(target) as (real, unlocked):
         return migrate_locked(target, real, unlocked)[1]
@@ -226,7 +243,7 @@ def migrate_profile(target):
 
 def saved_rows(target, missing=None):
     """Return a saved profile's rows after every 0.1.x migration, or `missing` when there is none."""
-    if not target.is_file():
+    if not profile_present(target):
         return missing
     with profile_lock(target) as (real, unlocked):
         rows = migrate_locked(target, real, unlocked)[0]
@@ -250,7 +267,7 @@ def save_profile(target, rows):
 def read_profile(name):
     check_profile_name(name)
     target = Path.home() / "profiles" / (name + ".json")
-    if not target.is_file():
+    if not profile_present(target):
         raise ProfileError("Select role models with t3-boat setup first")
     with profile_lock(target) as (real, unlocked):
         rows = migrate_locked(target, real, unlocked)[0]
@@ -281,7 +298,7 @@ def prepare(name, rows=None):
     home = Path.home()
     role_path = home / "profiles" / (name + ".json")
     save_selection = rows is not None
-    if rows is None and role_path.is_file():
+    if rows is None and profile_present(role_path):
         rows = read_profile(name)
     enabled = PROVIDERS[name]
     settings_path = Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
