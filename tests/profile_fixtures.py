@@ -20,6 +20,3 @@ def seeded_roles(home, profile):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(rows, indent=2) + "\n")
     return rows
-
-
-FIXTURES = Path(__file__).resolve().parent / "fixtures"

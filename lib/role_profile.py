@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 """Apply one Docker installation's editable role table before starting T3."""
-import ctypes
-import errno
-import fcntl
-import glob
 import json
-import hashlib
 import os
 import re
 import stat
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -21,17 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 # Profiles, roles and model rules come from the pinned agent-playbook (lib/playbook.py).
 PROVIDERS = playbook.profiles()
 PARENT = "lead"
-LEGACY = {"orchestrator": PARENT, "adjudicator": "arbiter"}  # 0.1.x role names and their playbook names
 REQUIRED = tuple(playbook.role_keys())
 OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
-STOCK_0_1_0 = "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"  # claude-only.json
 MISSING = object()  # A saved profile that does not exist, as opposed to one holding JSON null.
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
 
 
 def write(target, content):
-    data = content if isinstance(content, bytes) else content.encode()
+    data = content.encode()
     if target.exists() and target.read_bytes() == data:
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -63,12 +55,18 @@ def json_kind(value):
     return {type(None): "null", list: "an array", str: "a string", bool: "a boolean"}.get(type(value), "a number")
 
 
-def validate_profile(name, rows):
-    check_profile_name(name)
+def check_roles(rows):
+    """Require a JSON object holding every role of this release."""
     if not isinstance(rows, dict):
         raise ProfileError(f"expected a JSON object of roles, found {json_kind(rows)}")
-    if not set(REQUIRED).issubset(rows):
-        raise ProfileError("expected roles " + ", ".join(REQUIRED))
+    missing = [role for role in REQUIRED if role not in rows]
+    if missing:
+        raise ProfileError("expected roles " + ", ".join(REQUIRED) + "; missing " + ", ".join(missing))
+
+
+def validate_profile(name, rows):
+    check_profile_name(name)
+    check_roles(rows)
     for role, row in rows.items():
         if not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", role) or not isinstance(row, dict):
             raise ProfileError(f"invalid role {role!r}")
@@ -92,84 +90,6 @@ class ProfileError(ValueError):
     """A problem with a file the user can repair; reported as one line."""
 
 
-TEMPORARY = ".t3-boat-tmp-"  # Marks temporary files beside a profile, so stale ones can be removed.
-# Errors meaning the environment cannot provide a lock, as opposed to a lock held by another process.
-NO_LOCK = {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS}
-
-
-def durable_temporary(real, data):
-    with NamedTemporaryFile(dir=real.parent, prefix="." + real.name + TEMPORARY, delete=False) as temporary:
-        temporary.write(data)
-        temporary.flush()
-        os.fsync(temporary.fileno())
-    return Path(temporary.name)
-
-
-@contextmanager
-def profile_lock(target):
-    """Serialise reads that migrate and saves of one profile.
-
-    Yields the file behind any symlink and the reason no lock could be taken, or None when it is held.
-    """
-    real = Path(os.path.realpath(target))
-    try:
-        real.parent.mkdir(parents=True, exist_ok=True)
-        lock = (real.parent / ("." + real.name + ".lock")).open("a")
-    except OSError as error:
-        if error.errno not in NO_LOCK:
-            raise
-        yield real, error.strerror
-        return
-    with lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-        except OSError as error:
-            if error.errno not in NO_LOCK:
-                raise
-            yield real, error.strerror
-            return
-        for stale in real.parent.glob(glob.escape("." + real.name + TEMPORARY) + "*"):
-            try:
-                stale.unlink(missing_ok=True)
-            except OSError:
-                pass  # Best effort, for example in a read-only directory.
-        yield real, None
-
-
-def no_replace(source, destination):
-    """Rename source to destination, failing with FileExistsError if destination exists."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    renameat2 = getattr(libc, "renameat2", None)
-    if renameat2 is None:
-        raise OSError(errno.ENOSYS, "renameat2 is unavailable")
-    at_cwd, no_replace_flag = -100, 1  # AT_FDCWD, RENAME_NOREPLACE
-    if renameat2(at_cwd, os.fsencode(source), at_cwd, os.fsencode(destination), no_replace_flag):
-        code = ctypes.get_errno()
-        raise OSError(code, os.strerror(code), str(destination))
-
-
-def keep_backup(real, data):
-    """Create the backup only if none exists; an existing non-empty backup is never replaced."""
-    backup = real.with_name(real.name + ".pre-0.2")
-    try:
-        if backup.stat().st_size == 0:
-            backup.unlink()  # Left by an interrupted run; it holds none of the original bytes.
-    except FileNotFoundError:
-        pass
-    temporary = durable_temporary(real, data)
-    try:
-        os.link(temporary, backup)
-    except FileExistsError:
-        pass
-    except OSError:  # A file system without hard links: a rename that never replaces.
-        try:
-            no_replace(temporary, backup)
-        except FileExistsError:
-            pass
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def profile_present(target):
     """Return whether a saved profile exists; anything there that cannot be read as a file names itself."""
     try:
@@ -184,105 +104,28 @@ def profile_present(target):
     return True
 
 
-def parse_profile(target, original):
-    """Decode a saved profile's bytes strictly as UTF-8 and parse the text; errors name the file."""
+def saved_rows(target, missing=None):
+    """Return a saved profile's parsed JSON, or `missing` when there is none; errors name the file."""
+    if not profile_present(target):
+        return missing
+    try:
+        original = target.read_bytes()
+    except FileNotFoundError:
+        return missing
+    except OSError as error:  # For example, a file the container user may not read.
+        raise ProfileError(f"{target}: cannot be read: {error.strerror or error}") from None
     try:
         return json.loads(original.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProfileError(f"{target}: {exc}") from None
 
 
-def migrated_rows(name, rows, original):
-    """Return the fully migrated rows for a saved 0.1.x profile, or None when it needs no migration."""
-    if not isinstance(rows, dict) or not LEGACY.keys() & rows.keys():
-        return None
-    for old, new in LEGACY.items():
-        if old in rows and new in rows:
-            raise ProfileError(f"both `{old}` and `{new}` roles are present; keep only `{new}`")
-    if name == "claude-only.json" and hashlib.sha256(original).hexdigest() == STOCK_0_1_0:
-        # The untouched 0.1.0 table: give the reviewers models distinct from the executor.
-        rows["reviewer2"]["model"] = "claude-sonnet-5-5"
-        rows["adjudicator"]["model"] = rows["reviewer1"]["model"]
-    return {LEGACY.get(role, role): row for role, row in rows.items()}
-
-
-def migrate_locked(target, real, unlocked):
-    """Migrate the profile while holding its lock; returns its rows after migration and whether it changed."""
-    try:
-        original = real.read_bytes()
-    except FileNotFoundError:
-        return MISSING, False
-    except OSError as error:  # For example, a file the container user may not read.
-        raise ProfileError(f"{target}: cannot be read: {error.strerror or error}") from None
-    rows = parse_profile(target, original)
-    try:
-        migrated = migrated_rows(target.name, rows, original)
-    except ProfileError as exc:
-        raise ProfileError(f"{target}: {exc}") from None
-    if migrated is None:
-        return rows, False
-    try:  # Never back up or rewrite a file whose migrated rows would not load.
-        validate_profile(target.name.removesuffix(".json"), migrated)
-    except ProfileError as exc:
-        raise ProfileError(f"{target}: needs migration to 0.2 but is invalid: {exc}") from None
-    if unlocked:
-        raise ProfileError(f"{target}: needs migration to 0.2 but cannot be locked: {unlocked}")
-    data = (json.dumps(migrated, indent=2) + "\n").encode()
-    temporary = None
-    try:
-        keep_backup(real, original)
-        temporary = durable_temporary(real, data)
-        os.replace(temporary, real)
-    except OSError as error:
-        if error.errno not in NO_LOCK:
-            raise
-        raise ProfileError(f"{target}: needs migration to 0.2 but cannot be written: {error.strerror}") from None
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return migrated, True
-
-
-def migrate_profile(target):
-    """Apply every 0.1.x migration to a saved profile in one atomic replacement, keeping a backup."""
-    if not profile_present(target):
-        return False  # Missing files are reported by the reader.
-    with profile_lock(target) as (real, unlocked):
-        return migrate_locked(target, real, unlocked)[1]
-
-
-def saved_rows(target, missing=None):
-    """Return a saved profile's rows after every 0.1.x migration, or `missing` when there is none."""
-    if not profile_present(target):
-        return missing
-    with profile_lock(target) as (real, unlocked):
-        rows = migrate_locked(target, real, unlocked)[0]
-    return missing if rows is MISSING else rows
-
-
-def save_profile(target, rows):
-    with profile_lock(target) as (real, unlocked):
-        data = (json.dumps(rows, indent=2) + "\n").encode()
-        if real.exists() and real.read_bytes() == data:
-            return
-        if unlocked:
-            raise ProfileError(f"{target}: cannot be saved without its lock: {unlocked}")
-        temporary = durable_temporary(real, data)
-        try:
-            os.replace(temporary, real)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-
 def read_profile(name):
     check_profile_name(name)
     target = Path.home() / "profiles" / (name + ".json")
-    if not profile_present(target):
-        raise ProfileError("Select role models with t3-boat setup first")
-    with profile_lock(target) as (real, unlocked):
-        rows = migrate_locked(target, real, unlocked)[0]
+    rows = saved_rows(target, missing=MISSING)
     if rows is MISSING:
-        raise ProfileError(f"{target}: the file disappeared while it was read")
+        raise ProfileError("Select role models with t3-boat setup first")
     try:
         return validate_profile(name, rows)
     except ProfileError as exc:  # Anything else is a defect and keeps its traceback.
@@ -369,13 +212,13 @@ def prepare(name, rows=None):
     updates[settings_path] = json.dumps(settings, indent=2) + "\n"
     # A provider's child shell may omit custom environment variables.
     updates[home / "profiles/active"] = name + "\n"
+    if save_selection:
+        updates[role_path] = json.dumps(rows, indent=2) + "\n"
     for path, data in updates.items():
         write(path, data)
     playbook_skills.remove(stale_skills)
     for path in kept:
         print(f"T3 Boat: kept your own {path}; the agent-playbook guide is not installed there.", file=sys.stderr)
-    if save_selection:
-        save_profile(role_path, rows)
 
 
 if __name__ == "__main__":

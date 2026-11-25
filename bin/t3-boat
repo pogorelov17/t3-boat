@@ -173,16 +173,17 @@ def parent_role(profile):
     path = Path.home() / "profiles" / (profile + ".json")
     try:
         rows = saved_rows(path, missing=MISSING)
-    except ValueError as error:  # The message names the file, for example when both parent keys are present.
+    except ValueError as error:  # The message names the file.
         raise ProfileError(str(error)) from None
     except OSError as error:
         raise ProfileError(f"{path}: {error}") from None
-    if rows is not MISSING and not isinstance(rows, dict):
-        raise ProfileError(f"{path}: expected a JSON object of roles, found {role_profile.json_kind(rows)}")
+    if rows is MISSING:
+        raise SetupError("The global role profile could not be read. Check docker logs t3-boat.")
     try:
-        return rows[PARENT]
-    except (KeyError, TypeError):
-        raise SetupError("The global role profile could not be read. Check docker logs t3-boat.") from None
+        role_profile.check_roles(rows)
+    except role_profile.ProfileError as error:
+        raise ProfileError(f"{path}: {error}") from None
+    return rows[PARENT]
 
 
 def receipt_path(profile, slug):
@@ -238,12 +239,17 @@ def choose_playbook(providers):
 def setup(profile, providers):
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
-    # Name an unreadable saved profile before installing anything or asking for a sign-in.
+    # Name an unreadable or incomplete saved profile before installing anything or asking for a sign-in.
     path = Path.home() / "profiles" / (profile + ".json")
     try:
-        saved_assignments(path)
+        rows = saved_assignments(path)
     except OSError as error:
         raise ProfileError(f"{path}: {error.strerror or error}") from None
+    if rows is not MISSING:
+        try:
+            role_profile.check_roles(rows)
+        except role_profile.ProfileError as error:
+            raise ProfileError(f"{path}: {error}") from None
     for provider in providers:
         if provider == "claude":
             run("install-claude")

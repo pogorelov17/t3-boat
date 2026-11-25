@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from profile_fixtures import FIXTURES, seeded_roles
+from profile_fixtures import seeded_roles
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -107,14 +107,22 @@ class RoleTests(unittest.TestCase):
                 self.assertIn(role, result.stderr)
                 self.assertEqual(json.loads(path.read_text()), rows)
 
-    def test_stock_claude_volume_upgrades_to_independent_review(self):
+    def test_stock_0_1_0_claude_volume_is_refused_unchanged(self):
         path = self.home / "profiles/claude-only.json"
         path.parent.mkdir()
-        path.write_bytes((FIXTURES / "v0.1.0/claude-only.json").read_bytes())
-        self.prepare("claude-only")
-        upgraded = json.loads(path.read_text())
-        for role in ("reviewer1", "reviewer2", "arbiter"):
-            self.assertNotEqual(upgraded[role]["model"], upgraded["executor"]["model"])
+        old = seeded_roles(self.home, "claude-only")
+        for role in ("reviewer2", "arbiter"):
+            old[role] = dict(old["executor"])
+        renamed = {"lead": "orchestrator", "arbiter": "adjudicator"}
+        old = {renamed.get(role, role): row for role, row in old.items()}
+        path.write_text(json.dumps(old, indent=2) + "\n")
+        before = path.read_bytes()
+        result = self.prepare("claude-only", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr.splitlines(), [f"T3 Boat profile: {path}: expected roles "
+                         "lead, executor, reviewer1, reviewer2, scout, researcher, arbiter; missing lead, arbiter"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["claude-only.json"])
 
     def test_profile_edits_take_effect_and_invalid_provider_fails_before_changes(self):
         seeded_roles(self.home, "claude-only")

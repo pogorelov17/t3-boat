@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import playbook_skills
-from role_profile import LEGACY, PARENT, PROVIDERS, OPTION, read_profile
+from role_profile import PARENT, PROVIDERS, OPTION, read_profile
 
 
 def output(*args):
@@ -253,11 +253,6 @@ def verify(environment, slug=None):
 
 def start(role_name):
     profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
-    if role_name in LEGACY:
-        current = LEGACY[role_name]
-        if current == PARENT:
-            raise ValueError(f"The {role_name} role is now `{PARENT}`, the parent chat. Select a child role from the active profile")
-        raise ValueError(f"The {role_name} role is now `{current}`. Run boat-worker start {current}")
     roles = read_profile(profile)
     guide = playbook_skills.worker_guide(Path.home(), role_name) if role_name in roles else None
     if role_name == PARENT or role_name not in roles:
