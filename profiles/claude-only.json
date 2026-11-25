@@ -1,5 +1,5 @@
 {
-  "orchestrator": {
+  "lead": {
     "provider": "claudeAgent",
     "model": "opus",
     "effort": "high"

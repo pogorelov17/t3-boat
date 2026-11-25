@@ -4,8 +4,101 @@
 set -eu
 version=2.1.330
 prefix="$HOME/.local"
-if [ -x "$prefix/bin/claude" ] && [ "$("$prefix/bin/claude" --version | cut -d ' ' -f 1)" = "$version" ]; then
-  exit 0
+
+# Succeed when $1 is dot-separated non-empty identifiers of letters, digits and hyphens.
+identifiers() {
+  case "$1" in
+    '' | .* | *. | *..* | *[!0-9A-Za-z.-]*) return 1 ;;
+  esac
+}
+
+# Print "MAJOR MINOR PATCH PRE" for [v]MAJOR.MINOR.PATCH[-pre][+build], or nothing.
+fields() {
+  word=${1#v}
+  core=${word%%[-+]*}
+  case "$core" in
+    *[!0-9.]* | .* | *. | *..* | *.*.*.*) return 0 ;;
+    *.*.*) ;;
+    *) return 0 ;;
+  esac
+  suffix=${word#"$core"}
+  pre=no
+  case "$suffix" in
+    -*)
+      label=${suffix#-}
+      label=${label%%+*}
+      identifiers "$label" || return 0
+      pre=yes
+      suffix=${suffix#-"$label"} ;;
+  esac
+  case "$suffix" in
+    '') ;;
+    +*) identifiers "${suffix#+}" || return 0 ;;
+    *) return 0 ;;
+  esac
+  major=${core%%.*}
+  rest=${core#*.}
+  printf '%s\n' "$major ${rest%%.*} ${rest#*.} $pre"
+}
+
+# Succeed when the digit string $1 is smaller than $2, whatever their length.
+smaller() {
+  a=${1#"${1%%[!0]*}"}
+  b=${2#"${2%%[!0]*}"}
+  if [ "${#a}" -ne "${#b}" ]; then
+    [ "${#a}" -lt "${#b}" ]
+    return
+  fi
+  [ "$a" != "$b" ] && [ "$(printf '%s\n%s\n' "$a" "$b" | LC_ALL=C sort | head -n 1)" = "$a" ]
+}
+
+# The first whitespace-delimited word of $*.
+first() {
+  printf '%s' "${1-}"
+}
+
+# Succeed when the installed executable answers --version successfully with a first word.
+answers() {
+  output=$("$prefix/bin/claude" --version 2>/dev/null) || return 1
+  printed=$(printf '%s\n' "$output" | head -n 1)
+  cr=$(printf '\r')
+  printed=${printed%"$cr"}
+  # Carriage returns, vertical tabs and form feeds separate words like spaces.
+  printed=$(printf '%s' "$printed" | tr '\r\v\f' '   ')
+  spaces=$IFS
+  IFS=$(printf ' \t\n.')
+  IFS=${IFS%.}
+  set -f
+  # shellcheck disable=SC2086
+  word=$(first $printed)
+  set +f
+  IFS=$spaces
+  [ -n "$word" ]
+}
+
+if [ -x "$prefix/bin/claude" ] && answers; then
+  installed=$(fields "$word")
+  if [ -z "$installed" ]; then
+    printf '%s\n' "install-claude: warning: unrecognised version '$printed' from $prefix/bin/claude; leaving it unchanged" >&2
+    exit 0
+  fi
+  # shellcheck disable=SC2086
+  set -- $installed $(fields "$version")
+  # Keep the installed version unless it is older than the pinned one.
+  if smaller "$1" "$5"; then :
+  elif smaller "$5" "$1"; then exit 0
+  elif smaller "$2" "$6"; then :
+  elif smaller "$6" "$2"; then exit 0
+  elif smaller "$3" "$7"; then :
+  elif smaller "$7" "$3"; then exit 0
+  elif [ "$4" = no ]; then
+    exit 0  # A pre-release of the pinned version is older than the release.
+  fi
+elif [ -e "$prefix/bin/claude" ] || [ -L "$prefix/bin/claude" ]; then
+  # A failing or silent --version means a broken installation. npm refuses to replace
+  # a command it did not create, so remove this installer's own entry point first.
+  printf '%s\n' "install-claude: $prefix/bin/claude --version failed or printed nothing; reinstalling $version" >&2
+  rm -f "$prefix/bin/claude"
 fi
 npm install --global --prefix "$prefix" --no-fund --no-audit "@anthropic-ai/claude-code@$version"
 "$prefix/bin/claude" --version

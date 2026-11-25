@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Apply one Docker installation's editable role table before starting T3."""
 import json
-import hashlib
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -14,9 +14,11 @@ PROVIDERS = {
     "claude-only": ("claudeAgent",),
     "codex+claude": ("codex", "claudeAgent"),
 }
-REQUIRED = ("orchestrator", "executor", "reviewer1", "reviewer2", "scout", "researcher", "adjudicator")
+PARENT = "lead"
+REQUIRED = (PARENT, "executor", "reviewer1", "reviewer2", "scout", "researcher", "adjudicator")
 OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
 CODEX_SOL = re.compile(r"gpt-[0-9]+(?:\.[0-9]+)*-sol(?:-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?")
+MISSING = object()  # A saved profile that does not exist, as opposed to one holding JSON null.
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
 
@@ -36,21 +38,33 @@ def write(target, content):
 
 def check_profile_name(name):
     if name not in PROVIDERS:
-        raise ValueError("T3_BOAT_PROFILE must be one of: " + ", ".join(PROVIDERS))
+        raise ProfileError("T3_BOAT_PROFILE must be one of: " + ", ".join(PROVIDERS))
+
+
+def json_kind(value):
+    return {type(None): "null", list: "an array", str: "a string", bool: "a boolean"}.get(type(value), "a number")
+
+
+def check_roles(rows):
+    """Require a JSON object holding every role of this release."""
+    if not isinstance(rows, dict):
+        raise ProfileError(f"expected a JSON object of roles, found {json_kind(rows)}")
+    missing = [role for role in REQUIRED if role not in rows]
+    if missing:
+        raise ProfileError("expected roles " + ", ".join(REQUIRED) + "; missing " + ", ".join(missing))
 
 
 def validate_profile(name, rows):
     check_profile_name(name)
-    if not isinstance(rows, dict) or not set(REQUIRED).issubset(rows):
-        raise ValueError("expected roles " + ", ".join(REQUIRED))
+    check_roles(rows)
     for role, row in rows.items():
         if not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", role) or not isinstance(row, dict):
-            raise ValueError(f"invalid role {role!r}")
+            raise ProfileError(f"invalid role {role!r}")
         if row.get("provider") not in PROVIDERS[name]:
-            raise ValueError(f"invalid provider for {role}")
+            raise ProfileError(f"invalid provider for {role}")
         for key in ("model", "effort"):
             if not isinstance(row.get(key), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:_/-]*", row[key]):
-                raise ValueError(f"invalid {key} for {role}")
+                raise ProfileError(f"invalid {key} for {role}")
     executor_model = rows["executor"]["model"]
     author = executor_model.rsplit("/", 1)[-1].casefold()
     for role in ("reviewer1", "reviewer2", "adjudicator"):
@@ -59,26 +73,60 @@ def validate_profile(name, rows):
                 and CODEX_SOL.fullmatch(model)):
             continue
         if model.rsplit("/", 1)[-1].casefold() == author:
-            raise ValueError(f"select a different model for {role}; {author} writes the code")
+            raise ProfileError(f"select a different model for {role}; {author} writes the code")
     return rows
+
+
+class ProfileError(ValueError):
+    """A problem with a file the user can repair; reported as one line."""
+
+
+def profile_present(target):
+    """Return whether a saved profile exists; anything there that cannot be read as a file names itself."""
+    try:
+        mode = os.stat(target).st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ProfileError(f"{target}: {error.strerror or error}") from None
+    if not stat.S_ISREG(mode):
+        kind = "a directory" if stat.S_ISDIR(mode) else "not a regular file"
+        raise ProfileError(f"{target}: is {kind}; expected a JSON file of roles")
+    return True
+
+
+def saved_rows(target, missing=None):
+    """Return a saved profile's parsed JSON, or `missing` when there is none; errors name the file."""
+    if not profile_present(target):
+        return missing
+    try:
+        original = target.read_bytes()
+    except FileNotFoundError:
+        return missing
+    except OSError as error:  # For example, a file the container user may not read.
+        raise ProfileError(f"{target}: cannot be read: {error.strerror or error}") from None
+    try:
+        return json.loads(original.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProfileError(f"{target}: {exc}") from None
 
 
 def read_profile(name):
     check_profile_name(name)
     target = Path.home() / "profiles" / (name + ".json")
-    if not target.is_file():
-        raise ValueError("Select role models with t3-boat setup first")
-    source = target
+    rows = saved_rows(target, missing=MISSING)
+    if rows is MISSING:
+        raise ProfileError("Select role models with t3-boat setup first")
     try:
-        return validate_profile(name, json.loads(source.read_text()))
-    except ValueError as exc:
-        raise ValueError(f"{source}: {exc}") from exc
+        return validate_profile(name, rows)
+    except ProfileError as exc:  # Anything else is a defect and keeps its traceback.
+        raise ProfileError(f"{target}: {exc}") from exc
 
 
 def instructions(path, content):
     previous = path.read_text() if path.exists() else ""
     if previous.count(BEGIN) != previous.count(END) or previous.count(BEGIN) > 1:
-        raise ValueError(f"Repair the t3-boat marker block in {path}")
+        raise ProfileError(f"Repair the t3-boat marker block in {path}")
     block = f"{BEGIN}\n{content}\n{END}" if content else ""
     if BEGIN in previous:
         start, rest = previous.split(BEGIN, 1)
@@ -94,30 +142,30 @@ def prepare(name, rows=None):
     home = Path.home()
     role_path = home / "profiles" / (name + ".json")
     save_selection = rows is not None
-    if rows is None and role_path.is_file():
-        # Preserve the 0.1.0 migration for its exact stock table.
-        if name == "claude-only" and hashlib.sha256(role_path.read_bytes()).hexdigest() == (
-                "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"):
-            rows = json.loads(role_path.read_text())
-            rows["reviewer2"]["model"] = "claude-sonnet-5-5"
-            rows["adjudicator"]["model"] = rows["reviewer1"]["model"]
-            save_selection = True
-        else:
-            rows = read_profile(name)
+    if rows is None and profile_present(role_path):
+        rows = read_profile(name)
     enabled = PROVIDERS[name]
     settings_path = Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
-    settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    raw = settings_path.read_bytes() if settings_path.exists() else b"{}"
+    try:
+        settings = json.loads(raw.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProfileError(f"{settings_path}: {exc}") from None
+    if not isinstance(settings, dict):
+        raise ProfileError(f"{settings_path}: expected a JSON object")
+    instances = settings.setdefault("providerInstances", {})
+    if not isinstance(instances, dict) or not all(isinstance(instances.get(p, {}), dict) for p in OPTION):
+        raise ProfileError(f"{settings_path}: providerInstances must be an object of objects")
     if rows is None:
         settings.pop("defaultModelSelection", None)
     else:
         validate_profile(name, rows)
-        parent = rows["orchestrator"]
+        parent = rows[PARENT]
         settings["defaultModelSelection"] = {
             "instanceId": parent["provider"], "model": parent["model"],
             "options": [{"id": OPTION[parent["provider"]], "value": parent["effort"]}],
         }
     settings["linkedEnvironmentsEnabled"] = True
-    instances = settings.setdefault("providerInstances", {})
     for provider in OPTION:
         instances.setdefault(provider, {}).update(driver=provider, enabled=provider in enabled)
 
@@ -136,10 +184,10 @@ def prepare(name, rows=None):
         if rows is not None and provider in enabled:
             override = base / "AGENTS.override.md"
             if provider == "codex" and override.is_file() and override.stat().st_size:
-                raise ValueError(f"{override} masks the required global profile")
+                raise ProfileError(f"{override} masks the required global profile")
             skill_path = base / "skills/t3-boat/SKILL.md"
             note = (
-                f"The active T3 Boat profile is `{name}`. You are the orchestrator / team lead. "
+                f"The active T3 Boat profile is `{name}`. You are the team lead, unless your task assigns you another role. "
                 f"Respond to the user's opening message in their language. If they ask where to begin, suggest a starting point based on their interests. "
                 f"Discuss ideas and plan new projects in this chat without starting a VM. Before any project inspection, tests, research or code changes, "
                 f"load and follow {skill_path} automatically. Every project uses this workflow. "
@@ -159,9 +207,9 @@ def prepare(name, rows=None):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit("usage: role_profile.py PROFILE")
     try:
-        if len(sys.argv) != 2:
-            raise ValueError("usage: role_profile.py PROFILE")
         prepare(sys.argv[1])
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
+    except ProfileError as exc:  # Anything else is a defect and keeps its traceback.
         sys.exit(f"T3 Boat profile: {exc}")

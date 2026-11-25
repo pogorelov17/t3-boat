@@ -44,7 +44,7 @@ class RolePickerTests(unittest.TestCase):
         self.stock = stock / "profiles" / (PROFILE + ".json")
         self.stock.with_name("codex-only.json").write_bytes((ROOT / "profiles/codex-only.json").read_bytes())
         families = {
-            "orchestrator": ("codex", "astra", "high"),
+            "lead": ("codex", "astra", "high"),
             "executor": ("claudeAgent", "opus", "high"),
             "reviewer1": ("claudeAgent", "fable", "high"),
             "reviewer2": ("codex", "astra", "high"),
@@ -105,7 +105,7 @@ class RolePickerTests(unittest.TestCase):
     def test_numbered_options_allow_editing_effort_without_changing_model(self):
         self.choose("1", "", "unlisted-model", "", "1", "")
         rows = json.loads(self.saved.read_text())
-        self.assertEqual(rows["orchestrator"], dict(provider="codex", model="gpt-6.2-astra", effort="medium"))
+        self.assertEqual(rows["lead"], dict(provider="codex", model="gpt-6.2-astra", effort="medium"))
 
     def test_unavailable_pin_requires_explicit_replacement_and_abort_preserves_file(self):
         self.choose("")

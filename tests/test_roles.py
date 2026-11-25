@@ -107,24 +107,28 @@ class RoleTests(unittest.TestCase):
                 self.assertIn(role, result.stderr)
                 self.assertEqual(json.loads(path.read_text()), rows)
 
-    def test_stock_claude_volume_upgrades_to_independent_review(self):
+    def test_stock_0_1_0_claude_volume_is_refused_unchanged(self):
         path = self.home / "profiles/claude-only.json"
         path.parent.mkdir()
         old = seeded_roles(self.home, "claude-only")
         for role in ("reviewer2", "adjudicator"):
             old[role] = dict(old["executor"])
+        old = {("orchestrator" if role == "lead" else role): row for role, row in old.items()}
         path.write_text(json.dumps(old, indent=2) + "\n")
-        self.prepare("claude-only")
-        upgraded = json.loads(path.read_text())
-        for role in ("reviewer1", "reviewer2", "adjudicator"):
-            self.assertNotEqual(upgraded[role]["model"], upgraded["executor"]["model"])
+        before = path.read_bytes()
+        result = self.prepare("claude-only", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr.splitlines(), [f"T3 Boat profile: {path}: expected roles "
+                         "lead, executor, reviewer1, reviewer2, scout, researcher, adjudicator; missing lead"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["claude-only.json"])
 
     def test_profile_edits_take_effect_and_invalid_provider_fails_before_changes(self):
         seeded_roles(self.home, "claude-only")
         self.prepare("claude-only")
         path = self.home / "profiles/claude-only.json"
         rows = json.loads(path.read_text())
-        rows["orchestrator"].update(model="custom-opus", effort="medium")
+        rows["lead"].update(model="custom-opus", effort="medium")
         path.write_text(json.dumps(rows))
         self.prepare("claude-only")
         settings = self.home / ".t3/userdata/settings.json"

@@ -15,8 +15,9 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from role_profile import read_profile, write
-from role_picker import configure_roles
+import role_profile
+from role_profile import MISSING, PARENT, read_profile, saved_rows, write
+from role_picker import configure_roles, saved_assignments
 
 PROFILES = {
     "codex-only": ("codex",),
@@ -31,6 +32,10 @@ LOCAL_URL = "http://127.0.0.1:3773"
 
 class SetupError(Exception):
     pass
+
+
+class ProfileError(SetupError):
+    """A saved profile the user must repair; the message names the file."""
 
 
 def probe(*argv):
@@ -167,9 +172,18 @@ def bind_project(slug, label):
 def parent_role(profile):
     path = Path.home() / "profiles" / (profile + ".json")
     try:
-        return json.loads(path.read_text())["orchestrator"]
-    except (OSError, KeyError, TypeError, ValueError):
-        raise SetupError("The global role profile could not be read. Check docker logs t3-boat.") from None
+        rows = saved_rows(path, missing=MISSING)
+    except ValueError as error:  # The message names the file.
+        raise ProfileError(str(error)) from None
+    except OSError as error:
+        raise ProfileError(f"{path}: {error}") from None
+    if rows is MISSING:
+        raise SetupError("The global role profile could not be read. Check docker logs t3-boat.")
+    try:
+        role_profile.check_roles(rows)
+    except role_profile.ProfileError as error:
+        raise ProfileError(f"{path}: {error}") from None
+    return rows[PARENT]
 
 
 def receipt_path(profile, slug):
@@ -198,6 +212,17 @@ def project_binding(git_dir):
 def setup(profile, providers):
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
+    # Name an unreadable or incomplete saved profile before installing anything or asking for a sign-in.
+    path = Path.home() / "profiles" / (profile + ".json")
+    try:
+        rows = saved_assignments(path)
+    except OSError as error:
+        raise ProfileError(f"{path}: {error.strerror or error}") from None
+    if rows is not MISSING:
+        try:
+            role_profile.check_roles(rows)
+        except role_profile.ProfileError as error:
+            raise ProfileError(f"{path}: {error}") from None
     for provider in providers:
         if provider == "claude":
             run("install-claude")
@@ -270,22 +295,27 @@ def status(profile, providers):
             failures.append(label)
 
     report("T3 HTTP server", t3_online())
+    problem = None
     try:
+        lead = parent_role(profile)
         t3_home = Path(os.environ.get("T3CODE_HOME") or Path.home() / ".t3")
         settings = json.loads((t3_home / "userdata/settings.json").read_text())
         selection = settings.get("defaultModelSelection", {})
-        orchestrator = parent_role(profile)
         expected = {("claudeAgent" if p == "claude" else p) for p in providers}
         instances = settings.get("providerInstances", {})
-        option = "effort" if orchestrator["provider"] == "claudeAgent" else "reasoningEffort"
-        active = (selection.get("instanceId") == orchestrator["provider"]
-                  and selection.get("model") == orchestrator["model"]
-                  and {"id": option, "value": orchestrator["effort"]} in selection.get("options", [])
+        option = "effort" if lead["provider"] == "claudeAgent" else "reasoningEffort"
+        active = (selection.get("instanceId") == lead["provider"]
+                  and selection.get("model") == lead["model"]
+                  and {"id": option, "value": lead["effort"]} in selection.get("options", [])
                   and all(instances.get(p, {}).get("enabled") is (p in expected) for p in ("codex", "claudeAgent"))
                   and settings.get("linkedEnvironmentsEnabled") is True)
+    except ProfileError as error:
+        active, problem = False, error
     except (OSError, ValueError, KeyError, TypeError, SetupError):
         active = False
     report(f"Global profile {profile} applied", active)
+    if problem:
+        print(f"  {problem}")
     for provider in providers:
         report(f"Local {provider} subscription login", logged_in(provider))
     registered = projects()
@@ -330,7 +360,16 @@ def main():
     if profile not in PROFILES:
         parser.error("set T3_BOAT_PROFILE to " + ", ".join(PROFILES))
     if args.command == "serve":
-        subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/role_profile.py"), profile], check=True)
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/role_profile.py"), profile],
+                                stderr=subprocess.PIPE, text=True)
+        if result.returncode:
+            *earlier, detail = result.stderr.rstrip("\n").split("\n")
+            if detail.startswith("T3 Boat profile:"):
+                sys.stderr.write("".join(line + "\n" for line in earlier))
+                sys.exit(f"{detail.rstrip('.')}. Next: repair the named file in the t3-boat-data volume, then restart the container.")
+            sys.stderr.write(result.stderr)
+            sys.exit(result.returncode)
+        sys.stderr.write(result.stderr)
         os.chdir(Path.home())
         os.execvp("t3", ["t3", "--no-browser", "--host", "0.0.0.0", "--port", "3773"])
     if args.command == "setup":
@@ -344,5 +383,8 @@ if __name__ == "__main__":
     os.umask(0o077)
     try:
         sys.exit(main())
+    except (ProfileError, role_profile.ProfileError) as error:
+        # The message names the file to repair; rerunning setup first would fail the same way.
+        sys.exit(f"T3 Boat profile: {error}")
     except (SetupError, ValueError, EOFError, OSError, KeyboardInterrupt) as error:
         sys.exit(f"{error or 'Setup interrupted.'}\nNext: docker exec -it t3-boat t3-boat setup")
