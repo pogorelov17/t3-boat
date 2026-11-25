@@ -1,0 +1,23 @@
+#!/bin/sh
+# Fetch the pinned agent-playbook commit (roles, skills and model sets) into DIRECTORY.
+# The image runs this at build time, so a running installation never fetches it.
+set -eu
+repository=https://github.com/pogorelov17/agent-playbook.git
+commit=2d213fc02b6805581073bf805df7e7d9dea321d6
+target=${1:?usage: fetch-playbook DIRECTORY}
+if [ "$(cat "$target/.commit" 2>/dev/null)" = "$commit" ]; then
+  exit 0
+fi
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+git -C "$work" init --quiet
+git -C "$work" fetch --quiet --depth 1 "$repository" "$commit"
+# A commit ID names its content, so this check pins every file.
+test "$(git -C "$work" rev-parse FETCH_HEAD)" = "$commit"
+mkdir -p "$work/tree"
+git -C "$work" archive FETCH_HEAD | tar -xf - -C "$work/tree"
+python3 "$work/tree/scripts/check.py" --root "$work/tree" >&2
+printf '%s\n' "$commit" > "$work/tree/.commit"
+rm -rf "$target"
+mkdir -p "$(dirname "$target")"
+mv "$work/tree" "$target"
