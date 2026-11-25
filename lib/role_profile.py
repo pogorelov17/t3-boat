@@ -8,16 +8,15 @@ import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+import playbook
+import playbook_skills
+
 ROOT = Path(__file__).resolve().parents[1]
-PROVIDERS = {
-    "codex-only": ("codex",),
-    "claude-only": ("claudeAgent",),
-    "codex+claude": ("codex", "claudeAgent"),
-}
+# Profiles, roles and model rules come from the pinned agent-playbook (lib/playbook.py).
+PROVIDERS = playbook.profiles()
 PARENT = "lead"
-REQUIRED = (PARENT, "executor", "reviewer1", "reviewer2", "scout", "researcher", "adjudicator")
+REQUIRED = tuple(playbook.role_keys())
 OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
-CODEX_SOL = re.compile(r"gpt-[0-9]+(?:\.[0-9]+)*-sol(?:-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?")
 MISSING = object()  # A saved profile that does not exist, as opposed to one holding JSON null.
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
@@ -39,6 +38,17 @@ def write(target, content):
 def check_profile_name(name):
     if name not in PROVIDERS:
         raise ProfileError("T3_BOAT_PROFILE must be one of: " + ", ".join(PROVIDERS))
+
+
+def family(provider, model):
+    """A model's family: sol for gpt-6.2-sol, opus for claude-opus-4-5-20251101; otherwise the model ID."""
+    name = model.rsplit("/", 1)[-1].casefold()
+    name = re.sub(r"-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2})$", "", name)
+    if provider == "codex":
+        match = re.fullmatch(r"gpt-[0-9]+(?:\.[0-9]+)*-([a-z]+)(?:-.*)?", name)
+    else:
+        match = re.fullmatch(r"claude-(?:([a-z]+)-[0-9].*|[0-9]+(?:[.-][0-9]+)*-([a-z]+)(?:-.*)?)", name)
+    return next((group for group in match.groups() if group), name) if match else name
 
 
 def json_kind(value):
@@ -65,15 +75,18 @@ def validate_profile(name, rows):
         for key in ("model", "effort"):
             if not isinstance(row.get(key), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:_/-]*", row[key]):
                 raise ProfileError(f"invalid {key} for {role}")
-    executor_model = rows["executor"]["model"]
-    author = executor_model.rsplit("/", 1)[-1].casefold()
-    for role in ("reviewer1", "reviewer2", "adjudicator"):
-        model = rows[role]["model"]
-        if (name == "codex-only" and role == "reviewer2" and model == executor_model
-                and CODEX_SOL.fullmatch(model)):
+    # The playbook's model rules: a model is its provider plus family, and effort does not tell two apart.
+    for role, other, shared in playbook.rules(name):
+        mine, theirs = rows[role], rows[other]
+        used = family(theirs["provider"], theirs["model"])
+        if mine["provider"] != theirs["provider"] or family(mine["provider"], mine["model"]) != used:
             continue
-        if model.rsplit("/", 1)[-1].casefold() == author:
-            raise ProfileError(f"select a different model for {role}; {author} writes the code")
+        if used == shared and mine["effort"] != theirs["effort"]:
+            continue  # The model set's declared exception, such as codex-only reviewer2 on the executor's Sol.
+        if used == shared:
+            raise ProfileError(f"select a different effort for {role}; {name} lets it share {other}'s "
+                               f"{used} family only at a different effort")
+        raise ProfileError(f"select a different model for {role}; {other} uses {theirs['provider']} {used}")
     return rows
 
 
@@ -173,12 +186,14 @@ def prepare(name, rows=None):
     table = ["## Active roles", "", "| Role | Provider | Model | Option |", "| --- | --- | --- | --- |"]
     for role, row in (rows or {}).items():
         table.append(f"| {role} | {row['provider']} | {row['model']} | {OPTION[row['provider']]}={row['effort']} |")
-    skill = policy.rstrip() + "\n\n" + "\n".join(table) + "\n"
     targets = [
         ("codex", Path(os.environ.get("CODEX_HOME") or home / ".codex"), "AGENTS.md"),
         ("claudeAgent", Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude"), "CLAUDE.md"),
     ]
-    updates = {}
+    # The owner's setup choice: agent-playbook role guides as skills for every enabled provider.
+    skill_files, stale_skills, kept, blocked = playbook_skills.plan(home, {p: base for p, base, _ in targets}, enabled)
+    updates = dict(skill_files)
+    installed = set(skill_files) | set(kept)  # Only guide files that will exist; a blocked path is never named.
     for provider, base, filename in targets:
         path = base / filename
         if rows is not None and provider in enabled:
@@ -193,8 +208,11 @@ def prepare(name, rows=None):
                 f"load and follow {skill_path} automatically. Every project uses this workflow. "
                 "Keep source on Boat. Report compact milestones in the parent. Never change models silently."
             )
-            updates[skill_path] = skill
-            updates[path] = instructions(path, note)
+            roster = playbook_skills.roster(base, installed)
+            rules = ["## Model rules", "", *playbook.rule_lines(name)]
+            updates[skill_path] = (policy.rstrip() + "\n\n" + "\n".join(table) + "\n\n" + "\n".join(rules) + "\n"
+                                   + ("\n" + roster if roster else ""))
+            updates[path] = instructions(path, note + playbook_skills.lead_note(base, installed))
         elif path.exists():
             updates[path] = instructions(path, "")
     updates[settings_path] = json.dumps(settings, indent=2) + "\n"
@@ -204,6 +222,13 @@ def prepare(name, rows=None):
         updates[role_path] = json.dumps(rows, indent=2) + "\n"
     for path, data in updates.items():
         write(path, data)
+    playbook_skills.remove(stale_skills)
+    for path in kept:
+        print(f"T3 Boat: kept your own {path}; it has no t3-boat marker, so it is used in place of the "
+              "agent-playbook guide.", file=sys.stderr)
+    for path, obstacle in blocked:
+        print(f"T3 Boat: {obstacle} is not a directory or a file t3-boat can replace; the agent-playbook guide "
+              f"{path} is not installed.", file=sys.stderr)
 
 
 if __name__ == "__main__":

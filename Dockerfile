@@ -30,6 +30,10 @@ RUN set -eu; \
 RUN --mount=type=bind,source=scripts/install-codex,target=/tmp/install-codex \
     sh /tmp/install-codex && npm cache clean --force
 
+# Role guides, skills and model sets from agent-playbook, pinned to one commit and read offline.
+RUN --mount=type=bind,source=scripts/fetch-playbook,target=/tmp/fetch-playbook \
+    sh /tmp/fetch-playbook /opt/t3-boat/playbook && chmod -R a+rX,go-w /opt/t3-boat/playbook
+
 ENV HOME=/data \
     PATH=/opt/t3-boat/bin:/data/.local/bin:${PATH} \
     BOAT_NO_UPDATE=1 \
@@ -39,7 +43,6 @@ RUN install -d -m 700 -o node -g node /data \
 COPY bin/ /opt/t3-boat/bin/
 COPY lib/ /opt/t3-boat/lib/
 COPY --chmod=755 scripts/install-claude /usr/local/bin/install-claude
-COPY profiles/ /opt/t3-boat/profiles/
 COPY skills/t3-boat/SKILL.md /opt/t3-boat/skills/t3-boat/SKILL.md
 RUN chmod 755 /opt/t3-boat/bin/* \
     && ln -s /opt/t3-boat/bin/boat-worker /usr/local/bin/boat-worker \

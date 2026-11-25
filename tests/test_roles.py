@@ -66,7 +66,7 @@ class RoleTests(unittest.TestCase):
                         for role, row in roles.items():
                             self.assertIn(f"| {role} | {row['provider']} | {row['model']} |", installed)
 
-    def test_codex_only_second_reviewer_can_share_the_executor_sol_at_any_effort(self):
+    def test_codex_only_second_reviewer_can_share_the_executor_sol_only_at_another_effort(self):
         path = self.home / "profiles/codex-only.json"
         path.parent.mkdir(exist_ok=True)
         rows = seeded_roles(self.home, "codex-only")
@@ -81,13 +81,17 @@ class RoleTests(unittest.TestCase):
                 rows["reviewer2"] = dict(rows["executor"], effort=effort)
                 path.write_text(json.dumps(rows))
                 result = self.prepare("codex-only", check=False)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                if effort == "medium":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("reviewer2", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(path.read_text()), rows)
 
     def test_other_reviews_require_a_different_author_model(self):
         for profile, model, role in [
             ("codex-only", "gpt-6.2-sol", "reviewer1"),
-            ("codex-only", "gpt-6.2-sol", "adjudicator"),
+            ("codex-only", "gpt-6.2-sol", "arbiter"),
             ("codex-only", "gpt-6.2-astra", "reviewer2"),
             ("codex+claude", "gpt-6.2-sol", "reviewer2"),
             ("claude-only", "claude-opus-5-5", "reviewer2"),
@@ -98,7 +102,7 @@ class RoleTests(unittest.TestCase):
                 rows = seeded_roles(self.home, profile)
                 provider = "claudeAgent" if profile == "claude-only" else "codex"
                 rows["executor"] = dict(provider=provider, model=model, effort="medium")
-                for other in ("reviewer1", "reviewer2", "adjudicator"):
+                for other in ("reviewer1", "reviewer2", "arbiter"):
                     rows[other]["model"] = "another-model"
                 rows[role] = dict(rows["executor"], effort="low")
                 path.write_text(json.dumps(rows))
@@ -111,15 +115,16 @@ class RoleTests(unittest.TestCase):
         path = self.home / "profiles/claude-only.json"
         path.parent.mkdir()
         old = seeded_roles(self.home, "claude-only")
-        for role in ("reviewer2", "adjudicator"):
+        for role in ("reviewer2", "arbiter"):
             old[role] = dict(old["executor"])
-        old = {("orchestrator" if role == "lead" else role): row for role, row in old.items()}
+        renamed = {"lead": "orchestrator", "arbiter": "adjudicator"}
+        old = {renamed.get(role, role): row for role, row in old.items()}
         path.write_text(json.dumps(old, indent=2) + "\n")
         before = path.read_bytes()
         result = self.prepare("claude-only", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stderr.splitlines(), [f"T3 Boat profile: {path}: expected roles "
-                         "lead, executor, reviewer1, reviewer2, scout, researcher, adjudicator; missing lead"])
+                         "lead, executor, reviewer1, reviewer2, scout, researcher, arbiter; missing lead, arbiter"])
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["claude-only.json"])
 

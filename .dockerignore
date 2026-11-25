@@ -7,10 +7,9 @@
 !scripts/
 !scripts/install-codex
 !scripts/install-claude
+!scripts/fetch-playbook
 !skills/
 !skills/t3-boat/
 !skills/t3-boat/SKILL.md
-!profiles/
-!profiles/*.json
 **/__pycache__/
 **/*.pyc

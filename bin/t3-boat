@@ -15,15 +15,15 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+import playbook
+import playbook_skills
 import role_profile
 from role_profile import MISSING, PARENT, read_profile, saved_rows, write
 from role_picker import configure_roles, saved_assignments
 
-PROFILES = {
-    "codex-only": ("codex",),
-    "claude-only": ("claude",),
-    "codex+claude": ("codex", "claude"),
-}
+# The playbook's model sets, with the provider names used for sign-in and Boat subscriptions.
+PROFILES = {name: tuple("claude" if p == "claudeAgent" else p for p in providers)
+            for name, providers in role_profile.PROVIDERS.items()}
 SUBSCRIPTIONS = {"codex": "chatgpt-subscription", "claude": "claude-subscription"}
 BOAT_ENV = "https://boat.dev/dashboard?tab=environment"
 BOAT_AI = "https://boat.dev/dashboard?tab=agents"
@@ -209,6 +209,37 @@ def project_binding(git_dir):
     return repo_slug(probe(*git, "remote.origin.url") or ""), probe(*git, "boat.environment")
 
 
+def choose_playbook(providers):
+    """Ask whether to install the agent-playbook skills on this machine; the answer is saved."""
+    current = playbook_skills.chosen(Path.home())
+    saved = playbook_skills.state_path(Path.home()).exists()
+    state = "installed" if current else "not installed"
+    keep = f"your saved answer ({'yes' if current else 'no'})" if saved else "the default (no)"
+    if not sys.stdin.isatty():
+        print(f"Agent-playbook skills: {state}, {keep}. Setup without a terminal asks nothing and keeps it; "
+              "run setup in a terminal to change it.")
+        return
+    homes = {"codex": os.environ.get("CODEX_HOME") or Path.home() / ".codex",
+             "claude": os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"}
+    print(f"Agent playbook {playbook.commit()[:12]}: role guides and skills for the team lead and every worker role "
+          f"({', '.join(playbook.roles())}).")
+    print("If you install them, they apply to every project on this machine. Nothing is added to your repositories.")
+    for provider in providers:
+        print(f"  {provider}: {Path(homes[provider]) / 'skills' / (playbook_skills.PREFIX + 'ROLE') / 'SKILL.md'}")
+    print("Each Boat worker VM also receives its own role's guide in its provider instruction file "
+          "(~/.codex/AGENTS.md or ~/.claude/CLAUDE.md on the VM). Files you created yourself are never replaced.")
+    print(f"Press Enter to keep {keep}.")
+    while True:
+        reply = input(f"Install the agent-playbook skills on this machine? [{'Y/n' if current else 'y/N'}] ").strip().lower()
+        if reply in ("", "y", "yes", "n", "no"):
+            break
+        print("Answer y or n.")
+    install = reply in ("y", "yes") or (not reply and current)
+    write(playbook_skills.state_path(Path.home()), "yes\n" if install else "no\n")
+    print("Agent-playbook skills will be installed." if install else
+          "Agent-playbook skills are not installed. Rerun setup to add them later.")
+
+
 def setup(profile, providers):
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
@@ -234,6 +265,7 @@ def setup(profile, providers):
                 run("claude", "auth", "login")
             if not logged_in(provider):
                 raise SetupError(f"A {provider} subscription login is required. Rerun setup to resume.")
+    choose_playbook(providers)
     configure_roles(profile)
     existing = projects()
     optional = " (Enter to resume existing projects)" if existing else " (Enter to start with an idea)"
