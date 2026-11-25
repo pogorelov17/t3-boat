@@ -1,59 +1,56 @@
-# T3 + Boat
+<h1 align="center">⛵ T3 Boat</h1>
+
+<p align="center"><strong>Run a team of coding agents on disposable Boat VMs from T3 Code.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/pogorelov17/t3-boat/actions/workflows/release.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/pogorelov17/t3-boat/release.yml?label=CI"></a>
+  <a href="https://hub.docker.com/r/pogorelov17/t3-boat"><img alt="amd64 + arm64" src="https://img.shields.io/badge/docker-amd64%20%2B%20arm64-0284c7?logo=docker&amp;logoColor=white"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> · <a href="https://hub.docker.com/r/pogorelov17/t3-boat">Docker Hub ↗</a> · <a href="https://github.com/pogorelov17/agent-playbook">Agent Playbook ↗</a>
+</p>
+
+```mermaid
+%%{init: {"flowchart": {"curve": "stepAfter", "rankSpacing": 26, "nodeSpacing": 22}}}%%
+flowchart TB
+    A(["Owner · Request"]):::endpoint
+    B["T3 Code · Lead<br/>Choose a role and prepare the brief"]:::lead
+    C["Boat · Start a fresh VM"]:::lead
+
+    subgraph VM["Worker VM"]
+        D["Agent opens the checkout"]:::work
+        Q{"Does the task change code?"}:::decision
+        DEV["Implement and test<br/>Open or update a draft PR"]:::work
+        REV["Investigate or review<br/>Write findings or a verdict"]:::work
+        R["Return result to the lead"]:::work
+        D --> Q
+        Q -->|Yes| DEV
+        Q -->|No| REV
+        DEV --> R
+        REV --> R
+    end
+
+    F["Lead records the result<br/>and releases the VM"]:::lead
+    G(["Owner · Result"]):::endpoint
+
+    A --> B --> C --> D
+    R --> F
+    F -->|Work complete| G
+    F -.->|Next assignment| B
+
+    classDef lead fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    classDef work fill:#f0fdfa,stroke:#0d9488,color:#134e4a
+    classDef decision fill:#fff7ed,stroke:#d97706,color:#78350f
+    classDef endpoint fill:#f5f3ff,stroke:#8b5cf6,color:#4c1d95
+    style VM fill:#f8fafc,stroke:#cbd5e1,stroke-dasharray:5 5,color:#64748b
+```
 
 Coordinate a team of coding agents across your GitHub projects from one Linux machine, local or remote. Bring an idea or an existing repository and work from a T3 chat with Codex, Claude or both. The code itself runs on disposable Boat VMs.
-
-[Quick start](#quick-start) · [Roles and models](#roles-and-models) · [Agent-playbook skills](#agent-playbook-skills) · [Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases)
 
 ## How it works
 
 Suppose you ask in T3, “Fix the failing test and show me why it broke.”
-
-```mermaid
-flowchart TD
-    owner(["👤 You<br/>an idea or a GitHub repository"]):::owner
-
-    subgraph machine["🖥️ Your Linux machine: the t3-boat container"]
-        lead["🧭 Team lead<br/>clarifies, writes the spec and plan"]:::lead
-        playbook[("📘 agent-playbook<br/>roles, model sets, role guides")]:::playbook
-    end
-
-    subgraph boat["☁️ Boat: one fresh VM per worker"]
-        scout["🔎 Scout<br/>finds the code"]:::helper
-        researcher["🌐 Researcher<br/>checks outside sources"]:::helper
-        executor["🛠️ Executor<br/>tests first, opens the PR"]:::executor
-        reviewer1["🔍 Reviewer 1"]:::reviewer
-        reviewer2["🔍 Reviewer 2"]:::reviewer
-        arbiter["⚖️ Arbiter<br/>settles disputes"]:::arbiter
-    end
-
-    pr{{"📬 Draft PR on GitHub<br/>one exact commit"}}:::pr
-
-    owner -->|chat in any language| lead
-    playbook -.->|models and guides| lead
-    lead -->|boat-worker start| scout
-    lead --> researcher
-    lead --> executor
-    executor -->|push| pr
-    pr --> reviewer1
-    pr --> reviewer2
-    reviewer1 -->|verdict| lead
-    reviewer2 -->|verdict| lead
-    lead -.->|conflicting verdicts or a disputed finding| arbiter
-    arbiter -.->|ruling| lead
-    lead -->|PR, tests and both verdicts| owner
-    owner ==>|you merge| pr
-
-    classDef owner fill:#fde68a,stroke:#b45309,color:#1f2937,stroke-width:2px
-    classDef lead fill:#c7d2fe,stroke:#4338ca,color:#1e1b4b,stroke-width:2px
-    classDef playbook fill:#bbf7d0,stroke:#15803d,color:#14532d
-    classDef helper fill:#bae6fd,stroke:#0369a1,color:#0c4a6e
-    classDef executor fill:#fed7aa,stroke:#c2410c,color:#431407,stroke-width:2px
-    classDef reviewer fill:#fbcfe8,stroke:#be185d,color:#500724
-    classDef arbiter fill:#ddd6fe,stroke:#6d28d9,color:#2e1065
-    classDef pr fill:#e2e8f0,stroke:#334155,color:#0f172a,stroke-width:2px
-    style machine fill:#eef2ff,stroke:#6366f1,color:#312e81
-    style boat fill:#f0f9ff,stroke:#0284c7,color:#0c4a6e
-```
 
 1. **T3 coordinates the work.** The team lead uses your installation’s role profile to choose the executor and reviewers. New chats in all your projects inherit those model and reasoning settings. While you are still discussing an idea, the conversation stays in T3 until there is a task for a worker.
 2. **Boat runs the code.** The executor checks out the repository on a disposable VM, reproduces the failure, tests the fix and opens a draft PR. Dependencies, builds and test runs stay on Boat, so your machine only hosts T3 and its history.
