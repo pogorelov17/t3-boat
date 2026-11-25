@@ -60,24 +60,40 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
-      - name: Publish the tested binaries and multi-platform tag
+      - name: Publish the tested images under one version tag
         run: |
           set -euo pipefail
           version=${RELEASE_TAG#v}
-          sources=()
+          skopeo --version
+          authfile="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+          expected=()
           for arch in amd64 arm64; do
-            zstd -dc "tested-$arch/image.tar.zst" | docker load
-            test "$(docker image inspect --format '{{.Architecture}}' t3-boat:test)" = "$arch"
-            tag="$REPOSITORY:$version-$arch"
-            docker tag t3-boat:test "$tag"
-            docker push "$tag"
-            digest=$(docker image inspect "$tag" --format '{{json .RepoDigests}}' |
-              jq -er --arg repo "$REPOSITORY" '.[] | select(startswith($repo + "@") or startswith("docker.io/" + $repo + "@")) | split("@")[1]')
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            sources+=("$REPOSITORY@$digest")
-            docker image rm t3-boat:test "$tag"
+            # Stage the archive saved after this platform's tests. The dir: layout keeps
+            # its manifest and image config byte for byte, so the digest names the
+            # tested image, and only the layers are compressed for the registry.
+            zstd -dq "tested-$arch/image.tar.zst" -o "$arch.tar"
+            config=$(tar -xOf "$arch.tar" manifest.json |
+              jq -er 'if length == 1 then .[0].Config else error("expected one image") end')
+            config=${config##*/}
+            config=sha256:${config%.json}
+            [[ "$config" =~ ^sha256:[0-9a-f]{64}$ ]]
+            skopeo copy --quiet --dest-compress "docker-archive:$arch.tar" "dir:staged-$arch"
+            rm "$arch.tar"
+            jq -e --arg config "$config" '.config.digest == $config' "staged-$arch/manifest.json" >/dev/null
+            jq -e --arg arch "$arch" '.os == "linux" and .architecture == $arch' \
+              "staged-$arch/${config#sha256:}" >/dev/null
+            digest=sha256:$(sha256sum < "staged-$arch/manifest.json" | cut -d' ' -f1)
+            # Push by digest only: no per-platform tag is created in the repository.
+            skopeo copy --preserve-digests --dest-authfile "$authfile" \
+              "dir:staged-$arch" "docker://$REPOSITORY@$digest"
+            expected+=("$digest linux/$arch")
           done
-          docker buildx imagetools create --tag "$REPOSITORY:$version" "${sources[@]}"
+          docker buildx imagetools create --tag "$REPOSITORY:$version" \
+            "$REPOSITORY@${expected[0]%% *}" "$REPOSITORY@${expected[1]%% *}"
+          # The version tag must list exactly the two tested images.
+          published=$(docker buildx imagetools inspect --raw "$REPOSITORY:$version" |
+            jq -r '.manifests[] | "\(.digest) \(.platform.os)/\(.platform.architecture)"')
+          diff <(printf '%s\n' "${expected[@]}") <(printf '%s\n' "$published")
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
