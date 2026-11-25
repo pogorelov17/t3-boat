@@ -1,10 +1,15 @@
 """Select and pin the models used by this installation's T3 roles."""
-import json
 import re
 from pathlib import Path
 
+import playbook
 from model_catalog import catalog
-from role_profile import MISSING, PROVIDERS, ROOT, ProfileError, json_kind, prepare, saved_rows, validate_profile
+from role_profile import MISSING, PROVIDERS, ProfileError, json_kind, prepare, saved_rows, validate_profile
+
+
+def stock_templates(profile):
+    """The playbook model set's suggested provider, model family and effort for every role row."""
+    return playbook.templates(profile)
 
 
 def stable_version(provider, family, model):
@@ -26,9 +31,12 @@ def stable_version(provider, family, model):
 
 def resolve_defaults(profile, templates, available):
     required_efforts = {role: {row["effort"]} for role, row in templates.items()}
-    if profile == "codex-only" and templates["executor"]["model"] == templates["reviewer2"]["model"] == "sol":
-        shared = required_efforts["executor"] | required_efforts["reviewer2"]
-        required_efforts["executor"] = required_efforts["reviewer2"] = shared
+    # A model set exception lets two rows share a family, for example codex-only reviewer2 and the
+    # executor on Sol. Both then resolve to the newest release that supports both efforts.
+    for role, other, family in playbook.rules(profile):
+        if family and templates[role]["model"].casefold() == templates[other]["model"].casefold() == family:
+            shared = required_efforts[role] | required_efforts[other]
+            required_efforts[role] = required_efforts[other] = shared
 
     rows = {}
     for role, template in templates.items():
@@ -95,7 +103,7 @@ def configure_roles(profile):
         raise ValueError("No models with supported effort levels were discovered. Check the provider login and rerun setup.")
 
     saved = Path.home() / "profiles" / (profile + ".json")
-    templates = json.loads((ROOT / "profiles" / saved.name).read_text())
+    templates = stock_templates(profile)
     defaults = resolve_defaults(profile, templates, available)
     rows = saved_assignments(saved)
     if rows is not MISSING:

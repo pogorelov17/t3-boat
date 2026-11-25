@@ -42,7 +42,7 @@ class RolePickerTests(unittest.TestCase):
         stock = self.home / "stock"
         (stock / "profiles").mkdir(parents=True)
         self.stock = stock / "profiles" / (PROFILE + ".json")
-        self.stock.with_name("codex-only.json").write_bytes((ROOT / "profiles/codex-only.json").read_bytes())
+        self.stock.with_name("codex-only.json").write_text(json.dumps(role_picker.playbook.templates("codex-only")))
         families = {
             "lead": ("codex", "astra", "high"),
             "executor": ("claudeAgent", "opus", "high"),
@@ -50,14 +50,15 @@ class RolePickerTests(unittest.TestCase):
             "reviewer2": ("codex", "astra", "high"),
             "scout": ("claudeAgent", "sonnet", "medium"),
             "researcher": ("codex", "sol", "high"),
-            "adjudicator": ("codex", "astra", "xhigh"),
+            "arbiter": ("codex", "astra", "xhigh"),
         }
         self.stock.write_text(json.dumps({
             role: dict(provider=p, model=m, effort=e) for role, (p, m, e) in families.items()
         }))
         for replacement in (
             patch.dict(os.environ, {"HOME": str(self.home)}, clear=True),
-            patch.object(role_picker, "ROOT", stock),
+            patch.object(role_picker, "stock_templates",
+                         lambda profile: json.loads(self.stock.with_name(profile + ".json").read_text())),
             patch.object(role_picker, "catalog", return_value=MODELS),
         ):
             replacement.start()

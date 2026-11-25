@@ -14,7 +14,8 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from role_profile import PARENT, PROVIDERS, OPTION, read_profile
+import playbook_skills
+from role_profile import LEGACY, PARENT, PROVIDERS, OPTION, read_profile
 
 
 def output(*args):
@@ -44,7 +45,22 @@ claude auth status 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.st
 """
 
 
-def bootstrap(role):
+def role_guide(provider, guide):
+    """Append the role's agent-playbook guide to the worker provider's global instruction file."""
+    if guide is None:
+        return ""
+    target = ('"${CODEX_HOME:-$HOME/.codex}/AGENTS.md"' if provider == "codex"
+              else '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md"')
+    block = f"<!-- BEGIN t3-boat -->\n{guide.rstrip()}\n<!-- END t3-boat -->"
+    return f"""
+guide={target}
+mkdir -p "$(dirname "$guide")"
+if [ -s "$guide" ]; then printf '\\n\\n' >> "$guide"; fi
+printf '%s\\n' {shlex.quote(block)} >> "$guide"
+"""
+
+
+def bootstrap(role, guide=None):
     provider = role["provider"]
     settings = {
         "linkedEnvironmentsEnabled": True,
@@ -63,16 +79,17 @@ mkdir -p "$HOME/.t3/userdata" "$HOME/t3-worker"
 printf '%s\\n' {shlex.quote(json.dumps(settings))} > "$HOME/.t3/userdata/settings.json"
 cd "$HOME/t3-worker"
 {subscription_check(provider)}
+{role_guide(provider, guide)}
 npm install --prefix "$HOME/t3-worker-runtime" t3@0.1.11 >&2
 nohup "$HOME/t3-worker-runtime/node_modules/.bin/t3" --no-browser --host 127.0.0.1 --port 3773 --auto-bootstrap-project-from-cwd >"$HOME/t3-worker.log" 2>&1 </dev/null &
 """
 
 
-def link(vm, role):
+def link(vm, role, guide=None):
     def remote(command):
         return output("boat", "ssh", vm, command)
 
-    remote("sh -c " + shlex.quote(bootstrap(role)))
+    remote("sh -c " + shlex.quote(bootstrap(role, guide)))
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -236,9 +253,13 @@ def verify(environment, slug=None):
 
 def start(role_name):
     profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
-    if role_name == "orchestrator":
-        raise ValueError(f"The orchestrator role is now `{PARENT}`, the parent chat. Select a child role from the active profile")
+    if role_name in LEGACY:
+        current = LEGACY[role_name]
+        if current == PARENT:
+            raise ValueError(f"The {role_name} role is now `{PARENT}`, the parent chat. Select a child role from the active profile")
+        raise ValueError(f"The {role_name} role is now `{current}`. Run boat-worker start {current}")
     roles = read_profile(profile)
+    guide = playbook_skills.worker_guide(Path.home(), role_name) if role_name in roles else None
     if role_name == PARENT or role_name not in roles:
         raise ValueError("Select a child role from the active profile")
     # Only provision from a configured project stub; nothing on the host fetches origin.
@@ -252,7 +273,9 @@ def start(role_name):
     vm = provision(name, environment)
     print(f"Boat ID: {vm}", flush=True)
     try:
-        link(vm, roles[role_name])
+        link(vm, roles[role_name], guide)
+        if guide:
+            print(f"Installed the agent-playbook {role_name} guide on {vm}", flush=True)
     except BaseException:
         subprocess.run(["boat", "delete", "--yes", vm], check=True)
         raise

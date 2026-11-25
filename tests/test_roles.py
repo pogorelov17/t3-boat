@@ -87,7 +87,7 @@ class RoleTests(unittest.TestCase):
     def test_other_reviews_require_a_different_author_model(self):
         for profile, model, role in [
             ("codex-only", "gpt-6.2-sol", "reviewer1"),
-            ("codex-only", "gpt-6.2-sol", "adjudicator"),
+            ("codex-only", "gpt-6.2-sol", "arbiter"),
             ("codex-only", "gpt-6.2-astra", "reviewer2"),
             ("codex+claude", "gpt-6.2-sol", "reviewer2"),
             ("claude-only", "claude-opus-5-5", "reviewer2"),
@@ -98,7 +98,7 @@ class RoleTests(unittest.TestCase):
                 rows = seeded_roles(self.home, profile)
                 provider = "claudeAgent" if profile == "claude-only" else "codex"
                 rows["executor"] = dict(provider=provider, model=model, effort="medium")
-                for other in ("reviewer1", "reviewer2", "adjudicator"):
+                for other in ("reviewer1", "reviewer2", "arbiter"):
                     rows[other]["model"] = "another-model"
                 rows[role] = dict(rows["executor"], effort="low")
                 path.write_text(json.dumps(rows))
@@ -113,7 +113,7 @@ class RoleTests(unittest.TestCase):
         path.write_bytes((FIXTURES / "v0.1.0/claude-only.json").read_bytes())
         self.prepare("claude-only")
         upgraded = json.loads(path.read_text())
-        for role in ("reviewer1", "reviewer2", "adjudicator"):
+        for role in ("reviewer1", "reviewer2", "arbiter"):
             self.assertNotEqual(upgraded[role]["model"], upgraded["executor"]["model"])
 
     def test_profile_edits_take_effect_and_invalid_provider_fails_before_changes(self):

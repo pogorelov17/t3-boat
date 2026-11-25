@@ -1,17 +1,64 @@
 # T3 + Boat
 
-Use a local or remote Linux machine to coordinate coding agents across your GitHub projects. Bring an idea or an existing repository, then work from a T3 chat using Codex, Claude, or both.
+Coordinate a team of coding agents across your GitHub projects from one Linux machine, local or remote. Bring an idea or an existing repository and work from a T3 chat with Codex, Claude or both. The code itself runs on disposable Boat VMs.
 
-[Quick start](#quick-start) · [Default role profiles](#default-role-profiles) · [Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases)
+[Quick start](#quick-start) · [Roles and models](#roles-and-models) · [Agent-playbook skills](#agent-playbook-skills) · [Docker Hub](https://hub.docker.com/r/pogorelov17/t3-boat) · [Releases](https://github.com/pogorelov17/t3-boat/releases)
 
 ## How it works
 
 Suppose you ask in T3, “Fix the failing test and show me why it broke.”
 
-1. **T3 coordinates the work.** The team lead uses your installation’s role profile to select the executor and reviewers. New chats across your projects inherit those model and reasoning settings. If you are still discussing an idea, the conversation can stay in T3 until you have a task for a worker.
-2. **Boat runs the code.** The executor checks out the repository on a disposable VM, reproduces the failure, tests the fix and opens a draft PR. Dependencies, builds and test runs stay on Boat, so your server only needs to host T3 and its history.
-3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit. Both send independent verdicts to the team lead. The first reviewer always uses a different model from the executor. If a fix is needed, a fresh executor updates the same PR and both reviewers check the new commit.
-4. **You decide when to merge.** The parent chat collects links to the agents, the test results, both verdicts and the PR. Once a worker’s result is recorded, its VM can be deleted. You can return to the chat or request another change on the PR without keeping workers running.
+```mermaid
+flowchart TD
+    owner(["👤 You<br/>an idea or a GitHub repository"]):::owner
+
+    subgraph machine["🖥️ Your Linux machine: the t3-boat container"]
+        lead["🧭 Team lead<br/>clarifies, writes the spec and plan"]:::lead
+        playbook[("📘 agent-playbook<br/>roles, model sets, role guides")]:::playbook
+    end
+
+    subgraph boat["☁️ Boat: one fresh VM per worker"]
+        scout["🔎 Scout<br/>finds the code"]:::helper
+        researcher["🌐 Researcher<br/>checks outside sources"]:::helper
+        executor["🛠️ Executor<br/>tests first, opens the PR"]:::executor
+        reviewer1["🔍 Reviewer 1"]:::reviewer
+        reviewer2["🔍 Reviewer 2"]:::reviewer
+        arbiter["⚖️ Arbiter<br/>settles disputes"]:::arbiter
+    end
+
+    pr{{"📬 Draft PR on GitHub<br/>one exact commit"}}:::pr
+
+    owner -->|chat in any language| lead
+    playbook -.->|models and guides| lead
+    lead -->|boat-worker start| scout
+    lead --> researcher
+    lead --> executor
+    executor -->|push| pr
+    pr --> reviewer1
+    pr --> reviewer2
+    reviewer1 -->|verdict| lead
+    reviewer2 -->|verdict| lead
+    lead -.->|conflicting verdicts| arbiter
+    arbiter -.->|ruling| lead
+    lead -->|PR, tests and both verdicts| owner
+    owner ==>|you merge| pr
+
+    classDef owner fill:#fde68a,stroke:#b45309,color:#1f2937,stroke-width:2px
+    classDef lead fill:#c7d2fe,stroke:#4338ca,color:#1e1b4b,stroke-width:2px
+    classDef playbook fill:#bbf7d0,stroke:#15803d,color:#14532d
+    classDef helper fill:#bae6fd,stroke:#0369a1,color:#0c4a6e
+    classDef executor fill:#fed7aa,stroke:#c2410c,color:#431407,stroke-width:2px
+    classDef reviewer fill:#fbcfe8,stroke:#be185d,color:#500724
+    classDef arbiter fill:#ddd6fe,stroke:#6d28d9,color:#2e1065
+    classDef pr fill:#e2e8f0,stroke:#334155,color:#0f172a,stroke-width:2px
+    style machine fill:#eef2ff,stroke:#6366f1,color:#312e81
+    style boat fill:#f0f9ff,stroke:#0284c7,color:#0c4a6e
+```
+
+1. **T3 coordinates the work.** The team lead uses your installation’s role profile to choose the executor and reviewers. New chats in all your projects inherit those model and reasoning settings. While you are still discussing an idea, the conversation stays in T3 until there is a task for a worker.
+2. **Boat runs the code.** The executor checks out the repository on a disposable VM, reproduces the failure, tests the fix and opens a draft PR. Dependencies, builds and test runs stay on Boat, so your machine only hosts T3 and its history.
+3. **Two reviewers check the same commit.** Each gets a fresh VM and the exact PR commit, and each sends its verdict to the team lead independently. The first reviewer always uses a different model from the executor. If a fix is needed, a fresh executor updates the same PR and both reviewers check the new commit. When the verdicts conflict, the arbiter rules before any repair.
+4. **You decide when to merge.** The parent chat collects links to the agents, the test results, both verdicts and the PR. Once a worker’s result is recorded, its VM is deleted. You can come back to the chat or ask for another change on the PR without keeping workers running.
 
 ## Quick start
 
@@ -43,7 +90,7 @@ docker exec -it t3-boat t3-boat setup
 | `claude-only` | Claude Code with Claude | Claude subscription |
 | `codex+claude` | Both | Both subscriptions |
 
-1. Follow the login prompts. Existing valid sessions are reused. For Claude profiles, setup keeps an installed Claude Code that is the pinned version or newer. If `claude --version` fails or prints nothing, setup reinstalls the pinned version. If it prints a version setup cannot read, setup leaves Claude Code unchanged and prints a warning. After sign-in, setup shows the model and reasoning level for each role. Press **Enter** to accept the table or select a role to customize it. At **GitHub repository URL**, enter a project URL or press **Enter** to open **Start here** with your own idea.
+1. Follow the login prompts. Existing valid sessions are reused. For Claude profiles, setup keeps an installed Claude Code that is the pinned version or newer. If `claude --version` fails or prints nothing, setup reinstalls the pinned version. If it prints a version setup cannot read, setup leaves Claude Code unchanged and prints a warning. After sign-in, setup asks whether to install the [agent-playbook skills](#agent-playbook-skills) on this machine and shows where they would go; the default is no. It then shows the model and reasoning level for each role. Press **Enter** to accept the table or select a role to customize it. At **GitHub repository URL**, enter a project URL or press **Enter** to open **Start here** with your own idea.
 2. Approve the Boat device login if prompted. In Boat, connect GitHub. Open **Agents & Proxying**, select your worker credential profile and connect the subscriptions in the table. Boat supplies these logins to new VMs. Select a private worker environment that passes GitHub and agent credentials and uses that credential profile. For a repository, grant the Boat GitHub App access to that repository with **Contents** and **Pull requests** write permissions. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
 3. Setup starts a fresh VM, authenticates to GitHub from it and requests one reply from each enabled provider. If you supplied a repository, it also reads its Git refs from that VM. Look for each success line, the deleted VM ID and **Setup verified**. If a check fails, fix the reported connection and rerun setup.
 
@@ -106,32 +153,36 @@ If you are unsure where to begin, ask the team lead for ideas. Wait for a reply 
 
 To work on another repository, rerun setup with its URL. To inspect current local logins, Boat configuration and the timestamp of the last successful VM check, run `docker exec t3-boat t3-boat status`. Status does not allocate a VM. Rerun setup for a fresh check after changing profiles, credentials or models.
 
-## Default role profiles
+## Roles and models
 
-Each entry is a suggested model family and reasoning level. On first setup, the installer selects the newest stable version of that family listed by T3 that supports the requested effort. You see the exact model IDs before accepting. Your choices apply to new chats across all projects on this server.
+The roles, their suggested models and the rules between them come from [agent-playbook](https://github.com/pogorelov17/agent-playbook/tree/2d213fc02b6805581073bf805df7e7d9dea321d6), pinned to commit `2d213fc02b68` and built into the image, so nothing is fetched while the container runs. `T3_BOAT_PROFILE` names one of the playbook’s model sets: `codex-only`, `claude-only` or `codex+claude`. Each set gives every role a provider, a model family and a reasoning level; see the [model set table](https://github.com/pogorelov17/agent-playbook/blob/2d213fc02b6805581073bf805df7e7d9dea321d6/README.md#model-sets) for the defaults. A role with two instances, the reviewer, becomes the rows `reviewer1` and `reviewer2`.
 
-| Role | Codex only | Claude only | Codex + Claude |
-| --- | --- | --- | --- |
-| Team lead | Astra · high | Opus · high | Astra · high |
-| Code scout | Luna · low | Haiku · medium | Haiku · medium |
-| Internet researcher | Sol · high | Opus · high | Sol · high |
-| **Executor** | **Sol · medium** | **Opus · high** | **Opus · high** |
-| Reviewer 1 | Astra · high | Fable · high | Fable · high |
-| Reviewer 2 | Sol · high | Sonnet · high | Astra · high |
-| Disputed reviews | Astra · xhigh | Fable · high | Astra · xhigh |
+On first setup, T3 + Boat picks the newest stable release of each family that T3 lists and that supports the suggested reasoning level. You see the exact model IDs before you accept them. Your choices apply to new chats in all projects on this machine.
 
-The first reviewer and the adjudicator use a different model from the executor. In **Codex only**, the default executor and second reviewer share the newest Sol that supports both effort levels. The second reviewer starts a separate read-only session on a fresh VM and reviews the same commit as the first reviewer. [Codex defaults](profiles/codex-only.json) · [Claude defaults](profiles/claude-only.json) · [Combined defaults](profiles/codex+claude.json).
+Setup enforces the playbook’s model rules: both reviewers and the arbiter use a different model from the executor. A model set can declare an exception. In `codex-only`, the second reviewer may share the executor’s Sol model, and by default both use the newest Sol that supports both reasoning levels; that reviewer still starts a separate read-only session on a fresh VM and reviews the same commit as the first.
 
-**Change your choices later.** Run `docker exec -it t3-boat t3-boat setup` again. Setup keeps your saved versions unless you edit a role or explicitly refresh the defaults. If a model or reasoning level is unavailable, choose a replacement before continuing.
+**Change your choices later.** Run `docker exec -it t3-boat t3-boat setup` again. Setup keeps your saved versions until you edit a role or type `refresh` to return to the current family defaults. Roles you added yourself are kept. If a model or reasoning level is no longer available, choose a replacement before continuing.
+
+## Agent-playbook skills
+
+The playbook also contains a role guide for each role: its instructions, its own skills (such as writing a plan, test-first development or reviewing a commit) and the shared skills it needs, such as verification and debugging. Setup asks whether to install them. They are optional, and T3 + Boat works the same way without them.
+
+If you answer **yes**:
+
+- On this machine, every role guide becomes a skill named `agent-playbook-ROLE` for each enabled provider, in `/data/.codex/skills/` and `/data/.claude/skills/`. They apply to every project here. Nothing is added to your repositories.
+- The team lead is told to follow `agent-playbook-lead`, and its workflow skill lists the installed guides.
+- Each worker started with `boat-worker start ROLE` receives its own role’s guide in its provider’s global instruction file on its VM (`~/.codex/AGENTS.md` for Codex, `~/.claude/CLAUDE.md` for Claude), so the guide is loaded before the worker does anything.
+
+If you answer **no**, or setup runs without a terminal, nothing is installed and guides installed earlier are removed. Without a terminal, setup keeps your previous answer and says so. Setup writes only files it generated itself, which carry a `t3-boat: generated from agent-playbook` line. A file you created at the same path is never replaced, and files you add to a skill folder stay there. Each container start refreshes the generated files from the pinned playbook and leaves unchanged files alone. To keep your own edits to a generated guide, delete its marker line.
 
 <details>
 <summary><strong>Keep your history when updating</strong></summary>
 
 Finish active jobs and back up the named volume privately. Stop and remove the old container, then repeat the start command with the new image tag, the same profile, and the same `t3-boat-data` volume. It holds chat history, project bindings, role settings, and account logins.
 
-The stock Claude profile from 0.1.0 upgrades automatically. If you customized that profile, assign reviewer and adjudicator models distinct from the executor before upgrading.
+The stock Claude profile from 0.1.0 upgrades automatically. If you customized that profile, assign reviewer and arbiter models distinct from the executor before upgrading.
 
-**Upgrading from 0.1.x.** The parent role formerly called `orchestrator` is now `lead`. Saved role profiles are migrated automatically when the container starts, and the original file is kept next to it as `profiles/PROFILE.json.pre-0.2`. If the profile is a symbolic link, the link is kept and the file it points to is migrated, with the backup beside that file. A profile that lists both `orchestrator` and `lead` stops the start with a message naming the file; keep only `lead`. A profile that would not be valid after the rename (for example, one with a missing role or a provider outside the profile) is left unchanged, without a backup, and the start and `t3-boat setup` stop with a one-line message naming the file. The same happens when the profile cannot be read, for example because of its permissions, or when a directory occupies its path; setup stops before it installs anything or asks you to sign in. The rename also makes the saved VM-check receipts stale, so `t3-boat status` asks for `t3-boat setup` once after the upgrade.
+**Upgrading from 0.1.x.** Role names now follow agent-playbook: the parent role formerly called `orchestrator` is now `lead`, and `adjudicator` is now `arbiter`. Your model choices and any roles you added are kept. Saved role profiles are migrated automatically when the container starts, and the original file is kept next to it as `profiles/PROFILE.json.pre-0.2`. If the profile is a symbolic link, the link is kept and the file it points to is migrated, with the backup beside that file. A profile that lists both an old and a new name, such as `orchestrator` and `lead`, stops the start with a message naming the file; keep only the new name. A profile that would not be valid after the rename (for example, one with a missing role or a provider outside the profile) is left unchanged, without a backup, and the start and `t3-boat setup` stop with a one-line message naming the file. The same happens when the profile cannot be read, for example because of its permissions, or when a directory occupies its path; setup stops before it installs anything or asks you to sign in. The rename also makes the saved VM-check receipts stale, so `t3-boat status` asks for `t3-boat setup` once after the upgrade.
 
 </details>
 
@@ -143,6 +194,8 @@ To change the packaged tools or workflow instructions, build from your edited so
 ```sh
 docker build -t t3-boat:local .
 ```
+
+The build fetches agent-playbook at the commit named in `scripts/fetch-playbook` and validates it with the playbook’s own checker. To use another playbook commit, change `commit` there and rebuild. T3 + Boat reads every file path from the playbook’s `team.json`, so a playbook that moves its role folders needs no change here. To run the unit tests from a checkout, first fetch the playbook with `sh scripts/fetch-playbook playbook`, then run `python3 -m unittest discover -s tests`.
 
 </details>
 

@@ -14,17 +14,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+import playbook
+import playbook_skills
+
 ROOT = Path(__file__).resolve().parents[1]
-PROVIDERS = {
-    "codex-only": ("codex",),
-    "claude-only": ("claudeAgent",),
-    "codex+claude": ("codex", "claudeAgent"),
-}
+# Profiles, roles and model rules come from the pinned agent-playbook (lib/playbook.py).
+PROVIDERS = playbook.profiles()
 PARENT = "lead"
-LEGACY_PARENT = "orchestrator"  # 0.1.x name of the parent role
-REQUIRED = (PARENT, "executor", "reviewer1", "reviewer2", "scout", "researcher", "adjudicator")
+LEGACY = {"orchestrator": PARENT, "adjudicator": "arbiter"}  # 0.1.x role names and their playbook names
+REQUIRED = tuple(playbook.role_keys())
 OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
-CODEX_SOL = re.compile(r"gpt-[0-9]+(?:\.[0-9]+)*-sol(?:-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?")
 STOCK_0_1_0 = "56398685df58d83b6a053c9213a0468afa56ecea6eb003b215731de95701dffb"  # claude-only.json
 MISSING = object()  # A saved profile that does not exist, as opposed to one holding JSON null.
 BEGIN = "<!-- BEGIN t3-boat -->"
@@ -49,6 +48,17 @@ def check_profile_name(name):
         raise ProfileError("T3_BOAT_PROFILE must be one of: " + ", ".join(PROVIDERS))
 
 
+def in_family(provider, family, model):
+    """Whether a model ID is a release of a family, for example gpt-6.2-sol or claude-opus-5-5."""
+    date = re.search(r"-(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2})$", model)
+    release = (model[:date.start()] if date else model).casefold()
+    family = re.escape(family.casefold())
+    if provider == "codex":
+        return re.fullmatch(r"gpt-[0-9]+(?:\.[0-9]+)*-" + family, release) is not None
+    version = r"[0-9]+(?:[.-][0-9]+)*"
+    return re.fullmatch(f"claude-(?:{family}-{version}|{version}-{family})", release) is not None
+
+
 def json_kind(value):
     return {type(None): "null", list: "an array", str: "a string", bool: "a boolean"}.get(type(value), "a number")
 
@@ -67,15 +77,14 @@ def validate_profile(name, rows):
         for key in ("model", "effort"):
             if not isinstance(row.get(key), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:_/-]*", row[key]):
                 raise ProfileError(f"invalid {key} for {role}")
-    executor_model = rows["executor"]["model"]
-    author = executor_model.rsplit("/", 1)[-1].casefold()
-    for role in ("reviewer1", "reviewer2", "adjudicator"):
-        model = rows[role]["model"]
-        if (name == "codex-only" and role == "reviewer2" and model == executor_model
-                and CODEX_SOL.fullmatch(model)):
-            continue
+    # The playbook's model rules, for example reviewers and the arbiter on a model other than the executor's.
+    for role, other, shared_family in playbook.rules(name):
+        model, theirs = rows[role]["model"], rows[other]["model"]
+        if shared_family and model == theirs and in_family(rows[role]["provider"], shared_family, model):
+            continue  # A declared exception of the model set, such as codex-only reviewer2 on the executor's Sol.
+        author = theirs.rsplit("/", 1)[-1].casefold()
         if model.rsplit("/", 1)[-1].casefold() == author:
-            raise ProfileError(f"select a different model for {role}; {author} writes the code")
+            raise ProfileError(f"select a different model for {role}; {other} uses {author}")
     return rows
 
 
@@ -185,15 +194,16 @@ def parse_profile(target, original):
 
 def migrated_rows(name, rows, original):
     """Return the fully migrated rows for a saved 0.1.x profile, or None when it needs no migration."""
-    if not isinstance(rows, dict) or LEGACY_PARENT not in rows:
+    if not isinstance(rows, dict) or not LEGACY.keys() & rows.keys():
         return None
-    if PARENT in rows:
-        raise ProfileError(f"both `{LEGACY_PARENT}` and `{PARENT}` roles are present; keep only `{PARENT}`")
+    for old, new in LEGACY.items():
+        if old in rows and new in rows:
+            raise ProfileError(f"both `{old}` and `{new}` roles are present; keep only `{new}`")
     if name == "claude-only.json" and hashlib.sha256(original).hexdigest() == STOCK_0_1_0:
         # The untouched 0.1.0 table: give the reviewers models distinct from the executor.
         rows["reviewer2"]["model"] = "claude-sonnet-5-5"
         rows["adjudicator"]["model"] = rows["reviewer1"]["model"]
-    return {(PARENT if role == LEGACY_PARENT else role): row for role, row in rows.items()}
+    return {LEGACY.get(role, role): row for role, row in rows.items()}
 
 
 def migrate_locked(target, real, unlocked):
@@ -329,12 +339,14 @@ def prepare(name, rows=None):
     table = ["## Active roles", "", "| Role | Provider | Model | Option |", "| --- | --- | --- | --- |"]
     for role, row in (rows or {}).items():
         table.append(f"| {role} | {row['provider']} | {row['model']} | {OPTION[row['provider']]}={row['effort']} |")
-    skill = policy.rstrip() + "\n\n" + "\n".join(table) + "\n"
     targets = [
         ("codex", Path(os.environ.get("CODEX_HOME") or home / ".codex"), "AGENTS.md"),
         ("claudeAgent", Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude"), "CLAUDE.md"),
     ]
-    updates = {}
+    # The owner's setup choice: agent-playbook role guides as skills for every enabled provider.
+    skill_files, stale_skills, kept = playbook_skills.plan(home, {p: base for p, base, _ in targets}, enabled)
+    updates = dict(skill_files)
+    installed = set(skill_files) | set(kept)
     for provider, base, filename in targets:
         path = base / filename
         if rows is not None and provider in enabled:
@@ -349,8 +361,9 @@ def prepare(name, rows=None):
                 f"load and follow {skill_path} automatically. Every project uses this workflow. "
                 "Keep source on Boat. Report compact milestones in the parent. Never change models silently."
             )
-            updates[skill_path] = skill
-            updates[path] = instructions(path, note)
+            roster = playbook_skills.roster(base, installed)
+            updates[skill_path] = policy.rstrip() + "\n\n" + "\n".join(table) + "\n" + ("\n" + roster if roster else "")
+            updates[path] = instructions(path, note + playbook_skills.lead_note(base, installed))
         elif path.exists():
             updates[path] = instructions(path, "")
     updates[settings_path] = json.dumps(settings, indent=2) + "\n"
@@ -358,6 +371,9 @@ def prepare(name, rows=None):
     updates[home / "profiles/active"] = name + "\n"
     for path, data in updates.items():
         write(path, data)
+    playbook_skills.remove(stale_skills)
+    for path in kept:
+        print(f"T3 Boat: kept your own {path}; the agent-playbook guide is not installed there.", file=sys.stderr)
     if save_selection:
         save_profile(role_path, rows)
 
