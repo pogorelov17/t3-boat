@@ -76,12 +76,17 @@ def usable(row, available):
     return bool(row) and row.get("effort") in available.get(row.get("provider"), {}).get(row.get("model"), [])
 
 
-def configure(profile, attachment):
-    """Pick the lead model for `profile` and save it together with the playbook `attachment` (or None)."""
+def configure(profile, attachment, package=None):
+    """Pick the lead model for `profile` and save it together with the playbook `attachment` (or None).
+
+    `package` is the attachment's package as setup read it and showed it to the owner. The suggestion below and
+    every file generated from this choice come from that one read, even when the configured path names another
+    release by now; the path itself is saved, so a later container start or setup reads whatever it names then.
+    Without `package` the attachment is read here, once.
+    """
     if profile not in PROVIDERS:
         raise ValueError(f"Unknown profile {profile!r}")
-    # Read the package once: the suggestion below and every file generated from this choice come from this read.
-    loaded = check_attachment(profile, attachment)
+    loaded = check_attachment(profile, attachment, package)
     package, model_set, lead_role = loaded
     discovered = catalog(profile)
     available = {

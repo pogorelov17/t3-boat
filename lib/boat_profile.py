@@ -106,15 +106,20 @@ def applied_path(name, home=None):
     return Path(home or Path.home()) / "profiles" / (name + ".applied.json")
 
 
-def check_attachment(name, attachment):
+def check_attachment(name, attachment, package=None):
     """Load the attachment of a profile that passed check_state; return (package, model set, lead role).
 
     Without an attachment all three are None. A package that is missing or malformed, or no longer has the chosen
-    model set or role, raises playbook.PlaybookError, naming the package file.
+    model set or role, raises playbook.PlaybookError, naming the package file. `package` is the copy of the
+    attachment's directory that setup already read and showed the owner: the choice is checked against it instead
+    of reading the directory again, which may by now name another release (a link the owner switched).
     """
     if attachment is None:
         return None, None, None
-    package = playbook.load(attachment["path"])
+    if package is None:
+        package = playbook.load(attachment["path"])
+    elif str(package.root) != attachment["path"]:
+        raise ValueError(f"the loaded package {package.root} is not the attached {attachment['path']}")
     lead_role = attachment["lead_role"]
     if lead_role is not None and lead_role not in package.roles:
         raise playbook.PlaybookError(f"{package.manifest_path}: no role {lead_role!r} for the team lead")

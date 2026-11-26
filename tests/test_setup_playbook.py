@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
+import boat_profile
 import model_picker
 import playbook
 import playbook_skills
@@ -19,17 +20,20 @@ from test_model_picker import MODELS
 from test_profile import save
 
 cli = SourceFileLoader("t3_boat_setup_tests", str(ROOT / "bin/t3-boat")).load_module()
+worker = SourceFileLoader("boat_worker_setup_tests", str(ROOT / "bin/boat-worker")).load_module()
 
 
 def answering(*entries):
+    """Answer each prompt in turn; a callable entry runs at its prompt and returns the answer."""
     answers = iter(entries)
 
     def answer(prompt):
         print(prompt, end="")
         try:
-            return next(answers)
+            entry = next(answers)
         except StopIteration:
             raise EOFError("Interrupted test input") from None
+        return entry() if callable(entry) else entry
     return patch("builtins.input", answer)
 
 
@@ -53,7 +57,9 @@ class ChoosePlaybookTests(unittest.TestCase):
     def choose(self, profile, current, *entries):
         output = io.StringIO()
         with answering(*entries), redirect_stdout(output):
-            result = cli.choose_playbook(profile, current)
+            result, package = cli.choose_playbook(profile, current)
+        # The package the owner was shown travels with the attachment it was read for.
+        self.assertEqual(package and str(package.root), result and result["path"])
         return result, output.getvalue()
 
     def test_enter_on_a_fresh_install_attaches_nothing(self):
@@ -183,6 +189,136 @@ class SetupWithPlaybookTests(unittest.TestCase):
             self.assertEqual(cli.status("codex-only", ("codex",)), 1)
         self.assertIn("[missing] Global profile codex-only applied", output.getvalue())
         self.assertIn("team.json", output.getvalue())
+
+
+class ReleaseSwitchTests(unittest.TestCase):
+    """A configured path that names the current release, such as a link the owner switches to deploy one."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name)
+        patcher = patch.dict(os.environ, {"HOME": str(self.home), "PATH": os.environ["PATH"],
+                                          "GIT_CONFIG_NOSYSTEM": "1"}, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Release A runs one rigger and suggests codex sol high for the lead; release B runs three and luna low.
+        for release, riggers, family, effort in (("A", 1, "sol", "high"), ("B", 3, "luna", "low")):
+            root = write_package(self.home / "teams/releases" / release, roles={"harbor-master": 1, "rigger": riggers},
+                                 sets={"crew": {"harbor-master": {"provider": "codex", "family": family,
+                                                                  "effort": effort}}},
+                                 version=f"{ord(release) - 64}.0.0")
+            with (root / "crew/rigger/ROLE.md").open("a") as guide:
+                guide.write(f"RELEASE-{release}\n")
+        self.current = self.home / "teams/current"
+        self.current.symlink_to("releases/A")
+        self.env = {"id": "abc", "name": "base", "safeForThirdParties": False, "passGithub": True,
+                    "passAgentsCredentials": True, "credentialProfileId": None, "selectedRepositories": []}
+        self.credentials = [{"id": "p", "isDefault": True, "connected": ["chatgpt-subscription"]}]
+
+    def switch(self, release):
+        """Point the link at another release in one step, as a deploy does."""
+        swap = self.home / "teams/.current.new"
+        swap.symlink_to("releases/" + release)
+        os.replace(swap, self.current)
+
+    def switching_to(self, release, answer):
+        def reply():
+            self.switch(release)
+            return answer
+        return reply
+
+    def run_setup(self, *answers):
+        output = io.StringIO()
+        with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
+                patch.object(cli, "add_workspace"), patch.object(cli, "run"), patch.object(cli, "probe", return_value=""), \
+                patch.object(cli, "boat_records", side_effect=lambda command, key: {
+                    "environments": [self.env], "profiles": self.credentials}[key]), \
+                patch.object(model_picker, "catalog", return_value=MODELS), answering(*answers), \
+                redirect_stdout(output), redirect_stderr(io.StringIO()):
+            cli.setup("codex-only", cli.PROFILES["codex-only"])
+        return output.getvalue()
+
+    def status(self):
+        output = io.StringIO()
+        with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
+                patch.object(cli, "probe", return_value=None), redirect_stdout(output):
+            code = cli.status("codex-only", cli.PROFILES["codex-only"])
+        return code, output.getvalue()
+
+    def generated(self):
+        """What the lead and its workers get: the saved choice, the applied record, the lead skill, the rigger
+        guide installed on this server and the guide a rigger worker receives."""
+        record = json.loads((self.home / "profiles/codex-only.applied.json").read_text())
+        guides = list((self.home / ".codex/skills").glob("playbook-harbor-crew-rigger-*/SKILL.md"))
+        self.assertEqual(len(guides), 1)
+        return (json.loads((self.home / "profiles/codex-only.json").read_text()), record,
+                (self.home / ".codex/skills/t3-boat/SKILL.md").read_text(), guides[0].read_text(),
+                worker.worker_plan("rigger")[3])
+
+    def assert_release(self, release, riggers, model):
+        state, record, skill, guide, worker_guide = self.generated()
+        other = "B" if release == "A" else "A"
+        self.assertEqual(state["playbook"], {"path": str(self.current), "model_set": "crew",
+                                             "lead_role": "harbor-master"})
+        self.assertEqual(state["lead"]["model"], model)
+        self.assertEqual(record["profile"], state)
+        self.assertEqual(record["playbook"]["label"], f"harbor-crew (version {ord(release) - 64}.0.0)")
+        self.assertIn(f"| rigger | {riggers} |", skill)
+        for text in (record["playbook"]["roles"]["rigger"], guide, worker_guide):
+            self.assertIn(f"RELEASE-{release}", text)
+            self.assertNotIn(f"RELEASE-{other}", text)
+
+    def test_setup_applies_the_release_it_displayed_when_the_link_switches_during_the_prompts(self):
+        output = self.run_setup(str(self.current), self.switching_to("B", "harbor-master"), "crew", "", "", "")
+        self.assertEqual(os.readlink(self.current), "releases/B")  # The switch happened mid-setup.
+        self.assertIn(f"Attaching harbor-crew (version 1.0.0) at {self.current}: roles harbor-master (1), "
+                      "rigger (1).", output)
+        self.assertIn("Suggested by harbor-crew model set crew for harbor-master: codex sol high", output)
+        self.assertNotIn("luna", output)
+        # Model selection, the lead's files and the workers' guides all come from release A, as displayed.
+        self.assertIn("lead: codex / gpt-6.10-sol / high", output)
+        self.assertIn("| harbor-master | 1 | codex | sol | high |", self.generated()[2])
+        self.assert_release("A", 1, "gpt-6.10-sol")
+        # The configured path now names B: status says so instead of calling A current.
+        code, report = self.status()
+        self.assertEqual(code, 1)
+        self.assertIn("[missing] Global profile codex-only applied", report)
+
+        # The next container start reads what the saved path names: release B, for the lead and the workers.
+        with redirect_stderr(io.StringIO()):
+            boat_profile.prepare("codex-only")
+        self.assert_release("B", 3, "gpt-6.10-sol")  # The saved lead model changes only by the owner's choice.
+        self.assertIn("[ok] Global profile codex-only applied", self.status()[1])
+
+        # Setup offers B's suggestion, and refresh takes it.
+        output = self.run_setup("", "", "", "refresh", "", "", "")
+        self.assertIn(f"Attaching harbor-crew (version 2.0.0) at {self.current}: roles harbor-master (1), "
+                      "rigger (3).", output)
+        self.assertIn("Suggested by harbor-crew model set crew for harbor-master: codex luna low", output)
+        self.assert_release("B", 3, "gpt-6-luna")
+        self.assertIn("| harbor-master | 1 | codex | luna | low |", self.generated()[2])
+        self.assertIn("[ok] Global profile codex-only applied", self.status()[1])
+
+    def test_cancelling_setup_after_the_link_switched_keeps_the_applied_choice(self):
+        self.run_setup(str(self.current), "harbor-master", "crew", "", "", "")
+        self.assert_release("A", 1, "gpt-6.10-sol")
+        files = [self.home / "profiles/codex-only.json", self.home / "profiles/codex-only.applied.json",
+                 self.home / ".codex/skills/t3-boat/SKILL.md", self.home / ".codex/AGENTS.md"]
+        before = [path.read_bytes() for path in files]
+        with self.assertRaises(EOFError):
+            self.run_setup("", self.switching_to("B", "harbor-master"))
+        self.assertEqual([path.read_bytes() for path in files], before)
+        self.assert_release("A", 1, "gpt-6.10-sol")
+
+    def test_the_attachment_is_checked_against_the_package_it_was_read_for(self):
+        package = playbook.load(str(self.current))
+        self.switch("B")
+        attachment = {"path": str(self.current), "model_set": "crew", "lead_role": "harbor-master"}
+        self.assertIs(boat_profile.check_attachment("codex-only", attachment, package)[0], package)
+        with self.assertRaises(ValueError):
+            boat_profile.check_attachment("codex-only", dict(attachment, path=str(self.home / "teams/releases/B")),
+                                          package)
 
 
 if __name__ == "__main__":
