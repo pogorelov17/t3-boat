@@ -402,6 +402,22 @@ class ProfileTests(unittest.TestCase):
         self.serve("codex+claude")
         self.assertTrue(boat_profile.applied("codex+claude"))
 
+    def test_escaped_surrogate_in_assignment_key_disables_profile_until_repaired(self):
+        profile = "codex-only"
+        save(self.home, profile, {"path": str(self.package), "model_set": "codex-crew", "lead_role": None})
+        self.serve(profile)
+        model_set = self.package / "assignments/codex-crew.json"
+        original = model_set.read_text()
+        data = json.loads(original)
+        data["roles"][chr(0xd800)] = next(iter(data["roles"].values()))
+        model_set.write_text(json.dumps(data))
+        result = self.serve(profile)
+        self.assertIn(f"{model_set}: JSON contains an unpaired Unicode surrogate", result.stderr)
+        self.assert_disabled(profile, "unpaired Unicode surrogate")
+        model_set.write_text(original)
+        self.serve(profile)
+        self.assertTrue(boat_profile.applied(profile))
+
     def test_a_nul_byte_in_a_guide_disables_the_profile_before_any_worker(self):
         save(self.home, "codex-only", {"path": str(self.package), "model_set": None, "lead_role": None})
         self.serve("codex-only")

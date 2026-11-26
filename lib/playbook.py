@@ -148,7 +148,12 @@ class Package:
     def _json(self, path):
         text = self._text(path)  # Its own errors already name the file.
         try:
-            return json.loads(text)
+            data = json.loads(text)
+            # JSON escapes can decode to a lone surrogate even when the source file is valid UTF-8.
+            json.dumps(data, ensure_ascii=False).encode("utf-8")
+            return data
+        except UnicodeEncodeError:
+            raise PlaybookError(f"{path}: JSON contains an unpaired Unicode surrogate") from None
         except (ValueError, RecursionError) as error:
             raise PlaybookError(f"{path}: {error if isinstance(error, ValueError) else 'nested too deeply'}") from None
 
