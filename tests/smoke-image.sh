@@ -308,7 +308,7 @@ SH
         docker exec -u 0 "$container" chmod 000 /data/teams/crew/people/qa_bot/ROLE.md
         message='/data/teams/crew/people/qa_bot/ROLE.md: cannot be read: Permission denied'
       else
-        docker exec "$container" rm /data/teams/crew/team.json
+        docker exec -u 0 "$container" rm /data/teams/crew/team.json
         message='/data/teams/crew/team.json is missing'
       fi
       restart
