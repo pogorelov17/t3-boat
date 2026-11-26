@@ -29,7 +29,10 @@ container_logs() {  # CONTAINER
 status_output() {  # CONTAINER
   local output status=0
   output=$(docker exec "$1" t3-boat status) || status=$?
-  if ((status > 1)); then
+  if ((status == 1)) && [[ ${output##*$'\n'} == 'Next: docker exec -it t3-boat t3-boat setup' ]]; then
+    status=0
+  fi
+  if ((status)); then
     printf '%s\n' "$output" >&2
     echo "docker exec $1 t3-boat status failed (exit $status)" >&2
     return "$status"

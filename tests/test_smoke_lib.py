@@ -25,7 +25,12 @@ elif sys.argv[1] == "exec" and sys.argv[3:] == ["t3-boat", "status"]:
         sys.exit(125)
     print("[missing] Boat account")
     print("  {NEEDLE}" if mode != "missing" else "  nothing")
+    if mode == "crash":
+        print("Workflow: generic workers")
+        sys.exit(1)
     sys.stdout.write("y" * {FILLER})
+    print()
+    print("Next: docker exec -it t3-boat t3-boat setup")
     sys.exit(1)  # Incomplete setup.
 else:
     sys.exit(2)
@@ -56,6 +61,12 @@ class SmokeLibTests(unittest.TestCase):
                 with self.subTest(script=script[:20], attempt=attempt):
                     result = self.check("match", script)
                     self.assertEqual((result.returncode, result.stdout), (0, "passed\n"), result.stderr[-500:])
+
+    def test_partial_status_followed_by_a_crash_fails(self):
+        result = self.check("crash", 'status=$(status_output c1); echo passed')
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("passed", result.stdout)
+        self.assertIn("Workflow: generic workers", result.stderr)
 
     def test_a_missing_match_fails(self):
         for script, label in ((self.LOGS, "docker logs"), (self.STATUS, "t3-boat status")):
