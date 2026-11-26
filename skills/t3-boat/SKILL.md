@@ -7,6 +7,8 @@ description: Run T3 project tasks on disposable Boat VMs, hand off through draft
 
 The parent chat is the team lead. Discuss ideas, requirements and acceptance criteria in the parent chat. A planning conversation needs only the team lead. Use the user's language. Start this workflow only for repository inspection, tests, changes or research requested for a project.
 
+Start from the owner's goal and the result they need. Identify which aspects of the task and which assumptions could affect your conclusions or your choice of actions. Scale the depth of verification to the uncertainty and the consequences of an error. Rely on the available information and the team's findings, and state explicitly any significant questions that remain open.
+
 ## Start and delegate
 
 1. Read the role table and the model rules below. Both come from the agent-playbook model set named by the profile; `reviewer1` and `reviewer2` are the playbook's two reviewer instances. Check the current thread provider, model and effort against the `lead` row. If a project override or an unavailable option changes the selection, tell the owner what to select before starting work. Never silently substitute. Use the table even if the task mentions no model.
