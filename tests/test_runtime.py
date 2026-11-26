@@ -9,7 +9,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from profile_fixtures import seeded_roles
+from test_profile import save
 
 ROOT = Path(__file__).resolve().parents[1]
 cli = SourceFileLoader("t3_boat_runtime", str(ROOT / "bin/t3-boat")).load_module()
@@ -26,7 +26,7 @@ class RuntimeTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         for profile in cli.PROFILES:
-            seeded_roles(self.home.name, profile)
+            save(self.home.name, profile)
         self.boat_env = {"id": "abc", "name": "base", "safeForThirdParties": False, "passGithub": True,
                          "passAgentsCredentials": True, "credentialProfileId": None,
                          "selectedRepositories": [{"fullName": "owner/example"}]}
@@ -72,8 +72,8 @@ class RuntimeTests(unittest.TestCase):
 
     def test_planning_setup_verifies_boat_then_attaches_first_repo_in_place(self):
         profile = "codex-only"
-        subprocess.run(["python3", str(ROOT / "lib/role_profile.py"), profile], check=True)
-        with patch.object(cli, "configure_roles"), patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
+        subprocess.run(["python3", str(ROOT / "lib/boat_profile.py"), profile], check=True)
+        with patch.object(cli, "configure"), patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
                 patch.object(cli, "add_workspace") as add, patch("builtins.input", return_value=""), \
                 patch.object(cli, "boat_records", side_effect=[[self.boat_env], self.profiles] * 2), \
                 patch.object(cli, "run") as run, patch.object(cli, "probe", return_value=""), \
@@ -103,7 +103,7 @@ class RuntimeTests(unittest.TestCase):
             return ""
         for profile, providers in cli.PROFILES.items():
             with self.subTest(profile=profile):
-                subprocess.run(["python3", str(ROOT / "lib/role_profile.py"), profile], check=True)
+                subprocess.run(["python3", str(ROOT / "lib/boat_profile.py"), profile], check=True)
                 self.profiles[0]["connected"] = [cli.SUBSCRIPTIONS[p] for p in providers]
                 calls.clear()
                 with patch.object(cli, "boat_records", side_effect=[[self.boat_env], self.profiles]), \
@@ -126,11 +126,11 @@ class RuntimeTests(unittest.TestCase):
         credentials = [{"isDefault": True, "connected": ["claude-subscription", "chatgpt-subscription"]}]
         empty = dict(self.boat_env, selectedRepositories=[])
         with patch.object(cli, "t3_online", return_value=True), patch.object(cli, "probe", side_effect=probe), \
-                patch.object(cli, "configure_roles"), \
+                patch.object(cli, "configure"), \
                 patch.object(cli, "logged_in", return_value=True) as auth, patch.object(cli, "run") as run, \
                 patch.object(cli, "projects", return_value=[git_dir]), patch.object(cli, "register") as register, \
                 patch.object(cli, "boat_records", side_effect=[[empty], credentials, [self.boat_env]]), \
-                patch("builtins.input", side_effect=["", "y"]), redirect_stdout(StringIO()):
+                patch("builtins.input", side_effect=["", "", "y"]), redirect_stdout(StringIO()):
             cli.setup("codex+claude", cli.PROFILES["codex+claude"])
         self.assertEqual([c.args[0] for c in auth.call_args_list], ["codex", "claude"])
         register.assert_called_once_with("owner/example", "base")

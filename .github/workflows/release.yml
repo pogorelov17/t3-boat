@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch the pinned agent-playbook
+      - name: Fetch the bundled agent-playbook for its tests
         run: sh scripts/fetch-playbook playbook
       - name: Test helpers
         run: python3 -m unittest discover -s tests -v

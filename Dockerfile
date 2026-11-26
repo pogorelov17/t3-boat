@@ -30,7 +30,7 @@ RUN set -eu; \
 RUN --mount=type=bind,source=scripts/install-codex,target=/tmp/install-codex \
     sh /tmp/install-codex && npm cache clean --force
 
-# Role guides, skills and model sets from agent-playbook, pinned to one commit and read offline.
+# agent-playbook pinned to one commit: setup offers it as the optional `bundled` playbook, read offline.
 RUN --mount=type=bind,source=scripts/fetch-playbook,target=/tmp/fetch-playbook \
     sh /tmp/fetch-playbook /opt/t3-boat/playbook && chmod -R a+rX,go-w /opt/t3-boat/playbook
 

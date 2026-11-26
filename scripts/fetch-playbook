@@ -1,6 +1,6 @@
 #!/bin/sh
-# Fetch the pinned agent-playbook commit (roles, skills and model sets) into DIRECTORY.
-# The image runs this at build time, so a running installation never fetches it.
+# Fetch the pinned agent-playbook commit into DIRECTORY. The image runs this at build time and setup offers the
+# result as the optional `bundled` playbook, so a running installation never fetches it.
 set -eu
 repository=https://github.com/pogorelov17/agent-playbook.git
 commit=a27b16a7d6962df7b26fc3233b8503f973f8d715

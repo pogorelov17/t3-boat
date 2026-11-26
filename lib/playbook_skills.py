@@ -1,93 +1,39 @@
-"""Install the agent-playbook role guides as provider skills, when the owner opts in during setup.
+"""Install an attached playbook's role guides as provider skills on this T3 server, and describe it to the lead.
 
-Each role's guide is its playbook bundle: the role document, the role's own skills and the shared skills
-it needs. On this machine every guide becomes a skill for each enabled provider. A Boat worker receives
-the guide of its own role in its provider's instruction file (see boat-worker).
+Each role's guide is its package bundle. On this machine every guide becomes a skill for each enabled provider,
+so the team lead can read what each role receives and delivers. A Boat worker started for a role receives that
+role's guide in its provider's instruction file on its VM (see boat-worker).
 """
 import json
 import os
 from pathlib import Path
 
-import playbook
+from playbook import slug
 
-# Both paths are relative to the home directory. STATE holds "yes" or "no" for the agent-playbook guides,
-# as earlier releases wrote it; WORKFLOW holds the workflow setup committed, one of WORKFLOWS.
-STATE = Path("profiles/playbook-skills")
-WORKFLOW = Path("profiles/workflow")
-PREFIX = "agent-playbook-"
-MARK = "<!-- t3-boat: generated from agent-playbook"
-# generic: the lead briefs generic workers and the profile needs only the `lead` row.
-# playbook: the agent-playbook role workflow, with its role guides installed as skills.
-# roles: the role workflow without the guides, kept for installations set up by an earlier release.
-WORKFLOWS = ("generic", "playbook", "roles")
+MARK = "<!-- t3-boat: generated from an attached playbook"
 
 
-def state_path(home):
-    return Path(home) / STATE
+def skill_name(package, role):
+    return slug(package.name) + "-" + slug(role)
 
 
-def workflow_path(home):
-    return Path(home) / WORKFLOW
+def skill_path(base, package, role):
+    return Path(base) / "skills" / skill_name(package, role) / "SKILL.md"
 
 
-def _read(path):
-    try:
-        return path.read_text().strip()
-    except OSError:
-        return None
+def description(package, role, lead_role):
+    count = package.roles[role]["instances"]
+    use = ("Load before your first response as the T3 Boat team lead, including ordinary discussion, and follow it "
+           "for the whole conversation." if role == lead_role else
+           f"Read it to brief a Boat worker for the {role} role (`boat-worker start {role}`).")
+    return (f"{package.name} {role} role guide ({count} instance{'s' if count != 1 else ''} declared). "
+            f"{use} {package.summary(role)}").strip()
 
 
-def workflow(home):
-    """The workflow of this machine: the one setup committed, or the one an earlier release used.
-
-    Earlier releases always ran the role workflow and saved only whether the guides were installed. An
-    installation they set up (a saved guide answer or a saved role profile) keeps the role workflow until
-    the owner chooses another one in setup; only a fresh installation starts with generic workers.
-    """
-    home = Path(home)
-    committed = _read(workflow_path(home))
-    if committed in WORKFLOWS:
-        return committed
-    guides = _read(state_path(home))
-    if guides == "yes":
-        return "playbook"
-    if guides is not None or any((home / "profiles").glob("*.json")):
-        return "roles"
-    return "generic"
-
-
-def chosen(home):
-    """Whether the agent-playbook guides are installed on this machine (the playbook workflow)."""
-    return workflow(home) == "playbook"
-
-
-def state_files(home, selected):
-    """The state files that commit workflow `selected`: write them after the instructions they describe."""
-    if selected not in WORKFLOWS:
-        raise ValueError(f"Unknown workflow {selected!r}")
-    # The guide answer keeps its meaning for an earlier release: only the playbook installs guides.
-    return {state_path(home): ("yes" if selected == "playbook" else "no") + "\n",
-            workflow_path(home): selected + "\n"}
-
-
-def skill_path(base, role):
-    return Path(base) / "skills" / (PREFIX + role) / "SKILL.md"
-
-
-def description(role):
-    """When a provider should load the guide: the role's rows, its own summary and what the guide holds."""
-    rows = " or ".join(f"`{key}`" for key in playbook.keys(role))
-    use = ("Load before your first response as the T3 Boat team lead (`lead`), including ordinary discussion, and "
-           "follow it for the whole conversation; not when a task assigns you another role."
-           if role == "lead" else f"Load when a task assigns you the {role} role (profile row {rows}).")
-    return (f"agent-playbook {role} role guide: who the {role} is, what it receives and delivers, its rules and "
-            f"report format, with its skills. {use} {playbook.summary(role)}").strip()
-
-
-def skill_text(role):
-    return (f"---\nname: {PREFIX}{role}\ndescription: {json.dumps(description(role))}\n---\n\n"
-            f"{MARK} {playbook.commit()}. t3-boat replaces this file; delete this line to keep your edits. -->\n\n"
-            + playbook.bundle(role))
+def skill_text(package, role, lead_role):
+    return (f"---\nname: {skill_name(package, role)}\ndescription: {json.dumps(description(package, role, lead_role))}\n---\n\n"
+            f"{MARK} {package.label()}. t3-boat replaces this file; delete this line to keep your edits. -->\n\n"
+            + package.bundle(role))
 
 
 def generated(path):
@@ -109,29 +55,29 @@ def obstacle(base, path):
     return None
 
 
-def plan(home, bases, enabled, install=None):
+def plan(bases, enabled, package, lead_role=None):
     """Return (files to write, generated files to remove, kept custom files, blocked guides).
 
-    `bases` maps each provider instance to its configuration directory; `enabled` lists the active ones.
-    `install` says whether guides are wanted; by default, whether this machine uses the playbook workflow.
-    Kept files are regular files the owner made at a guide path. Blocked guides are (guide path, obstacle)
-    pairs where something else occupies the path; they are neither written nor named to the team lead.
+    `bases` maps each provider instance to its configuration directory; `enabled` lists the active ones. Without
+    a package nothing is wanted, so every guide t3-boat generated earlier is removed. Kept files are regular files
+    the owner made at a guide path. Blocked guides are (guide path, obstacle) pairs where something else occupies
+    the path; they are neither written nor named to the team lead.
     """
-    install = chosen(home) if install is None else install
-    roles = set(playbook.roles()) if install else set()
     writes, removals, kept, blocked = {}, [], [], []
     for provider, base in bases.items():
-        wanted = roles if provider in enabled else set()
-        for role in sorted(wanted):
-            path = skill_path(base, role)
-            if (found := obstacle(base, path)) is not None:
-                blocked.append((path, found))
-            elif path.is_file() and not generated(path):
-                kept.append(path)
-            else:
-                writes[path] = skill_text(role)
-        for path in sorted((Path(base) / "skills").glob(PREFIX + "*/SKILL.md")):
-            if path.parent.name.removeprefix(PREFIX) not in wanted and generated(path):
+        wanted = set()
+        if package is not None and provider in enabled:
+            for role in package.roles:
+                path = skill_path(base, package, role)
+                wanted.add(path)
+                if (found := obstacle(base, path)) is not None:
+                    blocked.append((path, found))
+                elif path.is_file() and not generated(path):
+                    kept.append(path)
+                else:
+                    writes[path] = skill_text(package, role, lead_role)
+        for path in sorted((Path(base) / "skills").glob("*/SKILL.md")):
+            if path not in wanted and generated(path):
                 removals.append(path)
     return writes, removals, kept, blocked
 
@@ -145,44 +91,67 @@ def remove(paths):
             pass
 
 
-def lead_note(base, installed):
-    """The sentences telling the team lead to follow its own guide from its first response, or an empty string.
+def lead_note(base, package, lead_role, installed):
+    """The sentence sending the team lead to the guide of the role setup chose for it, or an empty string.
 
-    `installed` holds the guide files this run writes or keeps for the owner; a blocked path is never in it,
-    and without the owner's opt-in nothing is, so the lead is never sent to a guide that is not there.
+    `installed` holds the guide files this run writes or keeps for the owner; a blocked path is never in it.
     """
-    path = skill_path(base, "lead")
+    if package is None or lead_role is None:
+        return ""
+    path = skill_path(base, package, lead_role)
     if path not in installed:
         return ""
-    return (f" As the team lead, load and follow your agent-playbook role guide at {path} before your first "
-            "response, including ordinary discussion and questions, and keep following it for the whole "
-            "conversation. When your task assigns you another role, follow that role's guide instead of this one; "
-            "every worker started with boat-worker receives its own role guide.")
+    return (f" The owner attached the playbook {package.name}: load and follow its {lead_role} guide at {path} "
+            "before your first response, including ordinary discussion and questions, and for the whole conversation.")
 
 
-def roster(base, installed):
-    """The skill section listing the guides installed for one provider, or an empty string."""
-    rows = []
-    for role in playbook.roles():
-        path = skill_path(base, role)
-        if path in installed:
-            rows.append(f"| {role} | {', '.join(playbook.keys(role))} | {path} |")
-    if not rows:
-        return ""
-    return "\n".join([
-        "## Agent playbook", "",
-        f"Role guides from agent-playbook {playbook.commit()} are installed on this machine. "
-        "Each `boat-worker start ROLE` also writes that role's guide into the worker's own instruction file, "
-        "so brief every worker with the inputs listed under `What you receive` in its guide.", "",
-        "| Playbook role | Profile rows | Guide |", "| --- | --- | --- |", *rows, "",
-    ])
+def _cell(value):
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
-def worker_guide(home, key):
-    """The instruction text for a worker in profile row `key`, or None without a guide."""
-    role = playbook.role_of(key)
-    if not chosen(home) or role is None or role == "lead":
-        return None
-    row = "" if key == role else f" (profile row `{key}`)"
-    return (f"You are the {role}{row} on this team. Your role guide from agent-playbook {playbook.commit()} "
-            f"follows. Follow it for this whole task.\n\n{playbook.bundle(role)}")
+def section(base, package, model_set, lead_role, installed):
+    """The skill section that describes the attached package to the lead: data only, quoted from the package."""
+    lines = [
+        "## Attached playbook", "",
+        f"The owner attached the playbook {package.label()}. Its guides decide the workflow: which roles take part, "
+        "what each one receives and delivers, how many instances run, in what order and on which models. This skill "
+        "only says how to run them on Boat. Where the playbook and this skill differ, follow the playbook, except for "
+        "the machine boundary and the control plane above.", "",
+        (f"You, the T3 team lead, follow the `{lead_role}` guide." if lead_role else
+         "Setup assigned you none of these roles: you are the team lead and brief each role's worker yourself."), "",
+        "Start a worker for a role with `boat-worker start ROLE`: its VM receives that role's guide in its provider's "
+        "instruction file before the worker does anything. `boat-worker start` without a role starts a worker that "
+        "has only your brief. The table lists the roles and instance counts that the package's `team.json` declares.",
+        "", "| Role | Instances | Guide on this server |", "| --- | --- | --- |",
+    ]
+    for role, spec in package.roles.items():
+        path = skill_path(base, package, role)
+        lines.append(f"| {role} | {spec['instances']} | {path if path in installed else 'not installed'} |")
+    if model_set is None:
+        lines += ["", "No model set of the package is selected for this profile, so the package assigns no models "
+                      "here. Choose each worker's model yourself and name it in the parent update."]
+    else:
+        data = package.model_set(model_set)
+        lines += ["", f"### Model assignment: `{model_set}`", "",
+                  f"Selected in setup from {data['path']}. Resolve each family to an exact model that "
+                  "`orchestrator_capabilities` lists before you delegate; if none fits, tell the owner before "
+                  "starting the worker.", "",
+                  "| Role | Instance | T3 provider | Family | Effort |", "| --- | --- | --- | --- | --- |"]
+        for role, entries in data["roles"].items():
+            for number, entry in enumerate(entries, start=1):
+                lines.append(f"| {_cell(role)} | {number} | {entry['provider']} | {_cell(entry['family'])} | "
+                             f"{_cell(entry['effort'])} |")
+        if data["exceptions"]:
+            lines += ["", "Exceptions declared by this model set, as written in it:", "", "```json",
+                      json.dumps(data["exceptions"], indent=2), "```"]
+    if package.model_rules:
+        lines += ["", "Model rules declared by the package's `team.json`, as written in it:", "", "```json",
+                  json.dumps(package.model_rules, indent=2), "```"]
+    return "\n".join(lines) + "\n"
+
+
+def worker_guide(package, role):
+    """The instruction text a worker VM receives for one of the package's roles."""
+    return (f"You are a worker on a disposable Boat VM. The T3 team lead started you for the `{role}` role of the "
+            f"playbook {package.label(where=False)}. Your role guide follows; follow it and the lead's brief for this whole task. "
+            f"Do all project work here, on this VM.\n\n{package.bundle(role)}")
