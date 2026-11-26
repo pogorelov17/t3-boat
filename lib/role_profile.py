@@ -182,8 +182,13 @@ def prepare(name, rows=None):
     for provider in OPTION:
         instances.setdefault(provider, {}).update(driver=provider, enabled=provider in enabled)
 
-    policy = (ROOT / "skills/t3-boat/SKILL.md").read_text()
-    table = ["## Active roles", "", "| Role | Provider | Model | Option |", "| --- | --- | --- | --- |"]
+    # Without the owner's opt-in to the agent-playbook the lead delegates to generic workers; with it, the
+    # playbook's role workflow applies. The shared part (machine boundary, parent updates, cleanup) is in both.
+    roles_mode = playbook_skills.chosen(home)
+    policy = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip() + "\n\n" + (
+        ROOT / "skills/t3-boat" / ("playbook.md" if roles_mode else "generic.md")).read_text()
+    heading, column = ("## Active roles", "Role") if roles_mode else ("## Model presets", "Preset")
+    table = [heading, "", f"| {column} | Provider | Model | Option |", "| --- | --- | --- | --- |"]
     for role, row in (rows or {}).items():
         table.append(f"| {role} | {row['provider']} | {row['model']} | {OPTION[row['provider']]}={row['effort']} |")
     targets = [
@@ -204,14 +209,18 @@ def prepare(name, rows=None):
             note = (
                 f"The active T3 Boat profile is `{name}`. You are the team lead, unless your task assigns you another role. "
                 f"Respond to the user's opening message in their language. If they ask where to begin, suggest a starting point based on their interests. "
-                f"Discuss ideas and plan new projects in this chat without starting a VM. Before any project inspection, tests, research or code changes, "
+                f"Discuss ideas and plan new projects in this chat without starting a VM; targeted web fact checks are fine here. "
+                f"Before any project source inspection, edits, project commands, tests, installs, clones or extended research, "
                 f"load and follow {skill_path} automatically. Every project uses this workflow. "
-                "Keep source on Boat. Report compact milestones in the parent. Never change models silently."
+                "Keep source on Boat. Post compact, factual updates in the parent. Never change models silently."
             )
             roster = playbook_skills.roster(base, installed)
-            rules = ["## Model rules", "", *playbook.rule_lines(name)]
-            updates[skill_path] = (policy.rstrip() + "\n\n" + "\n".join(table) + "\n\n" + "\n".join(rules) + "\n"
-                                   + ("\n" + roster if roster else ""))
+            sections = [policy.rstrip(), "\n".join(table)]
+            if roles_mode:
+                sections.append("\n".join(["## Model rules", "", *playbook.rule_lines(name)]))
+            if roster:
+                sections.append(roster.rstrip())
+            updates[skill_path] = "\n\n".join(sections) + "\n"
             updates[path] = instructions(path, note + playbook_skills.lead_note(base, installed))
         elif path.exists():
             updates[path] = instructions(path, "")

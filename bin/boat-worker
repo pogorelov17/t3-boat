@@ -45,11 +45,21 @@ claude auth status 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.st
 """
 
 
+# Instructions for a worker without an agent-playbook role guide: the lead's brief decides its job.
+WORKER_NOTE = """You are a worker on a disposable Boat VM, started by the T3 team lead. Your brief from the lead is your task; it decides what you do and what you deliver.
+
+- Do all source inspection, edits, project commands, tests, dependency installs, builds and clones here on this VM. If the brief names a repository, verify that a local checkout's origin matches it before using it, or clone it here.
+- Put code changes on a task branch and open a draft pull request through the project's authorized GitHub integration. Never push to the target branch.
+- You may split your work further only when the brief allows it and your tools support it. Name in your result what you handed on, to whom, and what came back.
+- End with a compact result for the lead: what you did, the commands you ran with pass or fail, the branch, exact commit SHA and pull request URL when there are any, open questions, and what is unverified. Report only what you observed. Link to details instead of pasting long logs.
+- Keep credentials, tokens and account details out of your result."""
+
+
 def role_guide(provider, guide):
-    """Append the role's agent-playbook guide to the worker provider's global instruction file.
+    """Append the worker's instructions (a role guide or WORKER_NOTE) to its provider's global instruction file.
 
     Codex reads a non-empty AGENTS.override.md instead of AGENTS.md, so the worker stops before the
-    guide is reported as delivered when one would hide it.
+    instructions are reported as delivered when one would hide them.
     """
     if guide is None:
         return ""
@@ -59,7 +69,7 @@ def role_guide(provider, guide):
         target = '"${CODEX_HOME:-$HOME/.codex}/AGENTS.md"'
         masked = """override="${CODEX_HOME:-$HOME/.codex}/AGENTS.override.md"
 if [ -f "$override" ] && [ -s "$override" ]; then
-  echo "$override on the worker VM masks the agent-playbook guide in AGENTS.md; remove it from the Boat environment" >&2
+  echo "$override on the worker VM masks the t3-boat worker instructions in AGENTS.md; remove it from the Boat environment" >&2
   exit 1
 fi"""
     else:
@@ -70,20 +80,23 @@ guide={target}
 mkdir -p "$(dirname "$guide")"
 if [ -s "$guide" ]; then printf '\\n\\n' >> "$guide"; fi
 printf '%s\\n' {shlex.quote(block)} >> "$guide"
-[ "$(tail -n 1 "$guide")" = {shlex.quote(end)} ] || {{ echo "The agent-playbook guide was not written to $guide" >&2; exit 1; }}
+[ "$(tail -n 1 "$guide")" = {shlex.quote(end)} ] || {{ echo "The t3-boat worker instructions were not written to $guide" >&2; exit 1; }}
 """
 
 
-def bootstrap(role, guide=None):
+def bootstrap(role, guide=None, providers=None):
+    """The VM setup script. `providers` lists the enabled provider instances; by default only the role's own."""
     provider = role["provider"]
+    providers = tuple(providers or (provider,))
     settings = {
         "linkedEnvironmentsEnabled": True,
         "defaultModelSelection": {
             "instanceId": provider, "model": role["model"],
             "options": [{"id": OPTION[provider], "value": role["effort"]}],
         },
-        "providerInstances": {p: {"driver": p, "enabled": p == provider} for p in OPTION},
+        "providerInstances": {p: {"driver": p, "enabled": p in providers} for p in OPTION},
     }
+    checks = "".join(subscription_check("claude" if p == "claudeAgent" else p) for p in OPTION if p in providers)
     return f"""
 set -eu
 umask 077
@@ -92,19 +105,19 @@ test ! -e "$HOME/.t3/userdata/settings.json"
 mkdir -p "$HOME/.t3/userdata" "$HOME/t3-worker"
 printf '%s\\n' {shlex.quote(json.dumps(settings))} > "$HOME/.t3/userdata/settings.json"
 cd "$HOME/t3-worker"
-{subscription_check(provider)}
-{role_guide(provider, guide)}
+{checks}
+{"".join(role_guide(p, guide) for p in OPTION if p in providers)}
 npm install --prefix "$HOME/t3-worker-runtime" t3@0.1.11 >&2
 nohup "$HOME/t3-worker-runtime/node_modules/.bin/t3" --no-browser --host 127.0.0.1 --port 3773 --auto-bootstrap-project-from-cwd >"$HOME/t3-worker.log" 2>&1 </dev/null &
 """
 
 
-def link(vm, role, guide=None):
+def link(vm, role, guide=None, providers=None):
     def remote(command):
         return output("boat", "ssh", vm, command)
 
     try:
-        remote("sh -c " + shlex.quote(bootstrap(role, guide)))
+        remote("sh -c " + shlex.quote(bootstrap(role, guide, providers)))
     except subprocess.CalledProcessError as error:  # The command holds the whole bootstrap script.
         raise RuntimeError(f"Worker setup on {vm} failed with exit status {error.returncode}; "
                            "see the message above") from None
@@ -269,12 +282,18 @@ def verify(environment, slug=None):
         print(f"[ok] Deleted {vm}", flush=True)
 
 
-def start(role_name):
+def start(role_name=None):
+    """Start a worker for a profile row, or a generic worker when no row is named."""
     profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
     roles = read_profile(profile)
-    guide = playbook_skills.worker_guide(Path.home(), role_name) if role_name in roles else None
-    if role_name == PARENT or role_name not in roles:
-        raise ValueError("Select a child role from the active profile")
+    if role_name is None:
+        # A generic worker opens with the lead's model; every provider of the profile stays selectable.
+        role, providers, label, role_guide_text = roles[PARENT], PROVIDERS[profile], "a generic worker", None
+    elif role_name == PARENT or role_name not in roles:
+        raise ValueError("Select a child role from the active profile, or run boat-worker start for a generic worker")
+    else:
+        role, providers, label = roles[role_name], None, role_name
+        role_guide_text = playbook_skills.worker_guide(Path.home(), role_name)
     # Only provision from a configured project stub; nothing on the host fetches origin.
     binding = subprocess.run(["git", "config", "--local", "--get", "boat.environment"],
                              text=True, capture_output=True)
@@ -282,12 +301,12 @@ def start(role_name):
     if binding.returncode or not environment or not output("git", "config", "--local", "--get", "remote.origin.url"):
         raise ValueError("Planning is ready in T3. Run t3-boat setup with a GitHub URL to enable coding on Boat.")
     name = "t3-worker-" + uuid.uuid4().hex[:12]
-    print(f"Creating Boat worker {name} for {role_name}", flush=True)
+    print(f"Creating Boat worker {name} for {label}", flush=True)
     vm = provision(name, environment)
     print(f"Boat ID: {vm}", flush=True)
     try:
-        link(vm, roles[role_name], guide)
-        if guide:
+        link(vm, role, role_guide_text or WORKER_NOTE, providers)
+        if role_guide_text:
             print(f"Installed the agent-playbook {role_name} guide on {vm}", flush=True)
     except BaseException:
         subprocess.run(["boat", "delete", "--yes", vm], check=True)
@@ -296,11 +315,11 @@ def start(role_name):
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "start":
-            start(sys.argv[2])
+        if len(sys.argv) in (2, 3) and sys.argv[1] == "start":
+            start(*sys.argv[2:])
         elif len(sys.argv) in (3, 4) and sys.argv[1] == "verify":
             verify(*sys.argv[2:])
         else:
-            sys.exit("usage: boat-worker start ROLE | verify ENVIRONMENT [OWNER/REPO]")
+            sys.exit("usage: boat-worker start [ROLE] | verify ENVIRONMENT [OWNER/REPO]")
     except (ValueError, OSError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
         sys.exit(f"Boat worker: {exc}")

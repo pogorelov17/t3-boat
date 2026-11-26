@@ -43,8 +43,8 @@ RUN install -d -m 700 -o node -g node /data \
 COPY bin/ /opt/t3-boat/bin/
 COPY lib/ /opt/t3-boat/lib/
 COPY --chmod=755 scripts/install-claude /usr/local/bin/install-claude
-COPY skills/t3-boat/SKILL.md /opt/t3-boat/skills/t3-boat/SKILL.md
-RUN chmod 755 /opt/t3-boat/bin/* \
+COPY skills/t3-boat/ /opt/t3-boat/skills/t3-boat/
+RUN chmod 755 /opt/t3-boat/bin/* && chmod -R a+rX,go-w /opt/t3-boat/skills \
     && ln -s /opt/t3-boat/bin/boat-worker /usr/local/bin/boat-worker \
     && ln -s /opt/t3-boat/bin/t3-boat /usr/local/bin/t3-boat \
     && ln -s /data/.local/bin/claude /usr/local/bin/claude

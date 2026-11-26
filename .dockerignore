@@ -10,6 +10,6 @@
 !scripts/fetch-playbook
 !skills/
 !skills/t3-boat/
-!skills/t3-boat/SKILL.md
+!skills/t3-boat/*.md
 **/__pycache__/
 **/*.pyc

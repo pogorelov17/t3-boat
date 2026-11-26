@@ -221,9 +221,11 @@ def choose_playbook(providers):
         return
     homes = {"codex": os.environ.get("CODEX_HOME") or Path.home() / ".codex",
              "claude": os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"}
-    print(f"Agent playbook {playbook.commit()[:12]}: role guides and skills for the team lead and every worker role "
-          f"({', '.join(playbook.roles())}).")
-    print("If you install them, they apply to every project on this machine. Nothing is added to your repositories.")
+    print("Without the agent playbook (the default), the team lead delegates any task to generic Boat workers "
+          "with a brief it writes. No roles or reviews are required.")
+    print(f"Agent playbook {playbook.commit()[:12]}: a predefined role workflow with role guides and skills for the "
+          f"team lead and every worker role ({', '.join(playbook.roles())}).")
+    print("If you install them, every project on this machine follows that workflow. Nothing is added to your repositories.")
     print("The team lead then follows its guide from its first response, including ordinary discussion.")
     for provider in providers:
         print(f"  {provider}: {Path(homes[provider]) / 'skills' / (playbook_skills.PREFIX + 'ROLE') / 'SKILL.md'}")
@@ -237,8 +239,9 @@ def choose_playbook(providers):
         print("Answer y or n.")
     install = reply in ("y", "yes") or (not reply and current)
     write(playbook_skills.state_path(Path.home()), "yes\n" if install else "no\n")
-    print("Agent-playbook skills will be installed." if install else
-          "Agent-playbook skills are not installed. Rerun setup to add them later.")
+    print("Agent-playbook skills will be installed; projects follow the role workflow." if install else
+          "Agent-playbook skills are not installed; the team lead delegates to generic workers. "
+          "Rerun setup to add them later.")
 
 
 def setup(profile, providers):
@@ -328,6 +331,8 @@ def status(profile, providers):
             failures.append(label)
 
     report("T3 HTTP server", t3_online())
+    print("Workflow: " + ("agent-playbook roles" if playbook_skills.chosen(Path.home()) else
+                          "generic workers (no agent playbook)"))
     problem = None
     try:
         lead = parent_role(profile)
