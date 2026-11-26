@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Exercise the release image on an isolated Docker daemon, without accounts.
 set -euo pipefail
+# shellcheck source=tests/smoke-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/smoke-lib.sh"
 image=${1:?Usage: smoke-image.sh IMAGE}
 container=
 volume=
@@ -115,12 +117,14 @@ SH
     docker exec "$container" jq -e 'keys | length == 7' "$role_file" >/dev/null
     docker exec "$container" grep -Fq '## Role playbook' "$skill"
     docker exec "$container" test -f "/data/$lead_dir/skills/agent-playbook-lead/SKILL.md"
-    { docker exec "$container" t3-boat status || true; } | grep -Fq 'Workflow: agent-playbook roles'
+    status=$(status_output "$container")
+    require 't3-boat status' "$status" 'Workflow: agent-playbook roles'
   else
     # A fresh generic setup selects one model, the lead row, and its VM check uses it.
     docker exec "$container" jq -e 'keys == ["lead"]' "$role_file" >/dev/null
     docker exec "$container" grep -Fq '## Generic workers' "$skill"
-    { docker exec "$container" t3-boat status || true; } | grep -Fq 'Workflow: generic workers'
+    status=$(status_output "$container")
+    require 't3-boat status' "$status" 'Workflow: generic workers'
   fi
   docker exec "$container" grep -Fq '## Machine boundary' "$skill"
   docker exec "$container" grep -Fq '## Parent updates' "$skill"
@@ -146,8 +150,10 @@ SH
   container=
   start
   if [[ -n "$left_behind" ]]; then
-    docker logs "$container" 2>&1 | grep -Fq 'run t3-boat setup with T3_BOAT_PROFILE=codex-only to complete it'
-    { docker exec "$container" t3-boat status || true; } | grep -Fq 'T3_BOAT_PROFILE=codex-only to complete it'
+    logs=$(container_logs "$container")
+    require 'docker logs' "$logs" 'run t3-boat setup with T3_BOAT_PROFILE=codex-only to complete it'
+    status=$(status_output "$container")
+    require 't3-boat status' "$status" 'T3_BOAT_PROFILE=codex-only to complete it'
     docker exec "$container" jq -e 'keys == ["lead"]' "$role_file" >/dev/null
   fi
   [[ $(docker exec "$container" cat /data/.t3/userdata/environment-id) = "$environment" ]]

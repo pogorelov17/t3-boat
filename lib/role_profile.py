@@ -238,13 +238,17 @@ def pending(home):
 
 
 def finish(home, record):
-    """Commit an interrupted setup's accepted choice: the profile rows, then the workflow, then drop the record."""
+    """Write an interrupted setup's accepted choice: the profile rows, then the workflow.
+
+    The record stays: the settings, instructions and guides generated from this state are still those of the
+    earlier choice, and only _prepare, once it has rewritten all of them, removes the record. A stop at any
+    point before that leaves the record, so the next entry point repeats this and regenerates them again.
+    """
     if record["rows"] is not None:
         write(Path(home) / "profiles" / (record["profile"] + ".json"), json.dumps(record["rows"], indent=2) + "\n")
     if record["workflow"] is not None:
         for path, data in playbook_skills.state_files(home, record["workflow"]).items():
             write(path, data)
-    journal_path(home).unlink(missing_ok=True)
 
 
 def recover(name):
@@ -256,7 +260,7 @@ def recover(name):
         if record is None:
             return False
         finish(home, record)
-        _prepare(name)
+        _prepare(name)  # Regenerates every file for the active profile, then removes the record.
         return True
 
 
@@ -274,6 +278,7 @@ def prepare(name, rows=None, workflow=None):
     with state_lock(home):
         record = pending(home)
         if record is not None:
+            # The record stays until _prepare has regenerated the files; a new choice replaces it at its commit point.
             finish(home, record)
         _prepare(name, rows, workflow)
 
@@ -380,6 +385,8 @@ def _prepare(name, rows=None, workflow=None):
     if commit:  # Last among the saved state: the workflow selects how the other files are read.
         for path, data in playbook_skills.state_files(home, workflow).items():
             write(path, data)
+    # Only now is every file generated from the saved state current; a stop before this keeps the record of an
+    # accepted setup (its own, or an interrupted one that finish() wrote), so the next entry point redoes it.
     journal_path(home).unlink(missing_ok=True)
     for path in kept:
         print(f"T3 Boat: kept your own {path}; it has no t3-boat marker, so it is used in place of the "

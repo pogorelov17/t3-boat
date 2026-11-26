@@ -553,6 +553,146 @@ class CommitRecoveryTests(Home):
         self.assertIn("your saved workflow", output)
         self.assertEqual(playbook_skills.workflow(self.home), "generic")
 
+    def recovery(self, entry, name, stop_at=None):
+        """Finish an interrupted commit in this process through `entry`, as `name`, stopping before write `stop_at`."""
+        real, calls = role_profile.write, []
+
+        def write(path, data):
+            if len(calls) == stop_at:
+                raise Interrupted()
+            calls.append(path)
+            real(path, data)
+
+        with patch.dict(os.environ, HOME=str(self.home)), patch.object(role_profile, "write", write), \
+                redirect_stdout(StringIO()), patch("sys.stderr", StringIO()):
+            try:
+                {"start": role_profile.prepare, "recover": role_profile.recover}[entry](name)
+            except Interrupted:
+                self.assertIsNotNone(stop_at)
+        return calls
+
+    def applied(self, profile):
+        """The saved state and the files a start of `profile` generates for its own providers.
+
+        A start of one profile leaves another provider's files as they were, so after a switch of profiles the
+        rest of the home directory still depends on what ran before it."""
+        snapshot, begin = self.snapshot(), role_profile.BEGIN.encode()
+        files = {k: v for k, v in snapshot.items() if k.parts[0] not in (".codex", ".claude")}
+        for provider, (folder, filename) in TARGETS.items():
+            note = snapshot.get(Path(folder, filename), b"")
+            block = note[note.find(begin):] if begin in note else b""
+            if provider not in playbook.providers(profile):
+                self.assertEqual(block, b"", f"{folder}/{filename} keeps a t3-boat block for a disabled provider")
+                continue
+            files[Path(folder, filename)] = block
+            if block:  # The instructions name the skills, so they are part of what is applied.
+                files.update({k: v for k, v in snapshot.items() if k.parts[:2] == (folder, "skills")})
+        return files
+
+    def interrupted(self, before, name, after, workflow, recovering, own_rows):
+        """A commit of `name` stopped just after its record, with `recovering`'s own rows saved first if asked."""
+        self.reset()
+        before(self)
+        self.recovery("start", name)  # In this process: there are many subtests.
+        if own_rows:
+            seeded_roles(self.home, recovering)
+        self.commit_rows(name, after(self, name), workflow, stop_at=1)
+
+    def test_an_interrupted_recovery_keeps_the_record_until_every_file_is_regenerated(self):
+        # A container start finishes the commit in prepare(); setup, status and boat-worker in recover(). Either
+        # may run under the profile that committed or under another one sharing the volume, and may itself stop.
+        entries = ("start", "recover")
+        name = "codex+claude"
+        for label, before, after, workflow in self.SCENARIOS:
+            for recovering, own_rows in ((name, False), *((p, rows) for p in PROFILES if p != name
+                                                          for rows in (False, True))):
+                case = (before, name, after, workflow, recovering, own_rows)
+                # The clean result: the whole commit, then a start of the recovering profile.
+                self.reset()
+                before(self)
+                self.recovery("start", name)
+                if own_rows:
+                    seeded_roles(self.home, recovering)
+                self.commit_rows(name, after(self, name), workflow)
+                self.recovery("start", recovering)
+                clean, clean_applied = self.snapshot(), self.applied(recovering)
+                # One uninterrupted recovery: its writes, counted, and the state that every retry must reach.
+                self.interrupted(*case)
+                total = len(self.recovery("recover", recovering))
+                recovered = self.snapshot()
+                self.assertFalse(role_profile.journal_path(self.home).exists())
+                with self.subTest(scenario=label, recovering=recovering, own_rows=own_rows):
+                    if recovering == name:
+                        self.assertEqual(recovered, clean)
+                    else:
+                        self.assertEqual(self.applied(recovering), clean_applied)
+                finished = 1 + len(playbook_skills.state_files(self.home, workflow))  # Rows and workflow first.
+                self.assertGreater(total, finished)
+                for first, retry in ((a, b) for a in entries for b in entries):
+                    for stop_at in range(total):
+                        with self.subTest(scenario=label, recovering=recovering, own_rows=own_rows, first=first,
+                                          retry=retry, stop_at=stop_at):
+                            self.interrupted(*case)
+                            self.recovery(first, recovering, stop_at)
+                            # Up to the last regenerated file, the record must survive the stop.
+                            self.assertTrue(role_profile.journal_path(self.home).exists())
+                            if stop_at >= finished:  # The rows and the workflow are already written.
+                                self.assertEqual(playbook_skills.workflow(self.home), workflow)
+                            # A second stop in the retry also keeps it; then one full retry finishes everything.
+                            self.recovery(retry, recovering, stop_at)
+                            self.assertTrue(role_profile.journal_path(self.home).exists())
+                            self.recovery(retry, recovering)
+                            self.assertFalse(role_profile.journal_path(self.home).exists())
+                            snapshot = self.snapshot()
+                            if snapshot != recovered:  # Name the files; a full diff of the snapshots is too slow.
+                                self.fail("differs from an uninterrupted recovery: " + ", ".join(
+                                    sorted(str(k) for k in snapshot.keys() | recovered.keys()
+                                           if snapshot.get(k) != recovered.get(k))))
+
+    def test_status_alone_regenerates_after_a_recovery_stopped_before_it_regenerated(self):
+        # An earlier release's role installation choosing generic workers with one model.
+        name = "codex-only"
+        seeded_roles(self.home, name)
+        self.prepare(name)
+        rows = rows_for(name, only_lead=True)
+        self.commit_rows(name, rows, "generic")
+        self.prepare(name)
+        expected = self.snapshot()
+        self.reset()
+        seeded_roles(self.home, name)
+        self.prepare(name)
+        self.commit_rows(name, rows, "generic", stop_at=1)
+        # The rows and the workflow are written, nothing generated from them yet.
+        self.recovery("recover", name, 1 + len(playbook_skills.state_files(self.home, "generic")))
+        self.assertEqual(playbook_skills.workflow(self.home), "generic")
+        self.assertEqual(json.loads((self.home / "profiles/codex-only.json").read_text()), rows)
+        self.assertIn("## Role playbook", self.skill("codex"))
+        self.assertTrue(role_profile.journal_path(self.home).exists())
+        with patch.dict(os.environ, HOME=str(self.home)), patch.object(cli, "t3_online", return_value=True), \
+                patch.object(cli, "logged_in", return_value=True), patch.object(cli, "probe", return_value=None), \
+                redirect_stdout(StringIO()) as out:
+            self.assertEqual(cli.status(name, cli.PROFILES[name]), 1)  # No Boat account in this test.
+        self.assertIn("Workflow: generic workers", out.getvalue())
+        self.assertIn(f"[ok] Global profile {name} applied", out.getvalue())
+        self.assertFalse(role_profile.journal_path(self.home).exists())
+        self.assertGeneric(self.skill("codex"))
+        self.assertEqual(self.snapshot(), expected)
+
+    def test_a_failed_regeneration_keeps_the_record_for_the_next_attempt(self):
+        name = "codex-only"
+        self.prepare(name)
+        self.commit_rows(name, rows_for(name, only_lead=True), "generic", stop_at=1)
+        settings = self.home / ".t3/userdata/settings.json"
+        good = settings.read_bytes()
+        settings.write_text("[")  # Unreadable until the owner repairs it.
+        result = self.prepare(name, check=False)
+        self.assertIn(f"{settings}:", result.stderr)
+        self.assertTrue(role_profile.journal_path(self.home).exists())
+        settings.write_bytes(good)
+        self.prepare(name)
+        self.assertFalse(role_profile.journal_path(self.home).exists())
+        self.assertGeneric(self.skill("codex"))
+
     def test_an_unreadable_commit_record_names_itself(self):
         journal = role_profile.journal_path(self.home)
         journal.parent.mkdir(parents=True)
