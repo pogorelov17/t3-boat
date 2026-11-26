@@ -15,15 +15,16 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+import boat_profile
 import playbook
-import playbook_skills
-import role_profile
-from role_profile import MISSING, PARENT, read_profile, saved_rows, write
-from role_picker import configure_roles, saved_assignments
+import playbook_fetch
+import playbook_pin
+from boat_profile import PARENT, read_profile, read_state, write
+from model_picker import configure
 
-# The playbook's model sets, with the provider names used for sign-in and Boat subscriptions.
+# The provider subscriptions of each profile, with the names used for sign-in and Boat subscriptions.
 PROFILES = {name: tuple("claude" if p == "claudeAgent" else p for p in providers)
-            for name, providers in role_profile.PROVIDERS.items()}
+            for name, providers in boat_profile.PROVIDERS.items()}
 SUBSCRIPTIONS = {"codex": "chatgpt-subscription", "claude": "claude-subscription"}
 BOAT_ENV = "https://boat.dev/dashboard?tab=environment"
 BOAT_AI = "https://boat.dev/dashboard?tab=agents"
@@ -170,20 +171,10 @@ def bind_project(slug, label):
 
 
 def parent_role(profile):
-    path = Path.home() / "profiles" / (profile + ".json")
     try:
-        rows = saved_rows(path, missing=MISSING)
-    except ValueError as error:  # The message names the file.
+        return read_profile(profile)[0][PARENT]
+    except (boat_profile.ProfileError, playbook.PlaybookError) as error:  # The message names the file.
         raise ProfileError(str(error)) from None
-    except OSError as error:
-        raise ProfileError(f"{path}: {error}") from None
-    if rows is MISSING:
-        raise SetupError("The global role profile could not be read. Check docker logs t3-boat.")
-    try:
-        role_profile.check_roles(rows)
-    except role_profile.ProfileError as error:
-        raise ProfileError(f"{path}: {error}") from None
-    return rows[PARENT]
 
 
 def receipt_path(profile, slug):
@@ -200,7 +191,12 @@ def read_receipt(profile, slug):
 
 
 def check_signature(profile, env, credential):
-    config = [read_profile(profile), env["id"], env.get("version"), credential]
+    """What a VM check covered: the lead model it probed and the environment, or None for a profile that cannot
+    be applied, which no check covers. The attached playbook does not change what the check covers."""
+    try:
+        config = [read_profile(profile)[0][PARENT], env["id"], env.get("version"), credential]
+    except (boat_profile.ProfileError, playbook.PlaybookError):
+        return None
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
 
@@ -209,52 +205,163 @@ def project_binding(git_dir):
     return repo_slug(probe(*git, "remote.origin.url") or ""), probe(*git, "boat.environment")
 
 
-def choose_playbook(providers):
-    """Ask whether to install the agent-playbook skills on this machine; the answer is saved."""
-    current = playbook_skills.chosen(Path.home())
-    saved = playbook_skills.state_path(Path.home()).exists()
-    state = "installed" if current else "not installed"
-    keep = f"your saved answer ({'yes' if current else 'no'})" if saved else "the default (no)"
-    if not sys.stdin.isatty():
-        print(f"Agent-playbook skills: {state}, {keep}. Setup without a terminal asks nothing and keeps it; "
-              "run setup in a terminal to change it.")
-        return
-    homes = {"codex": os.environ.get("CODEX_HOME") or Path.home() / ".codex",
-             "claude": os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"}
-    print(f"Agent playbook {playbook.commit()[:12]}: role guides and skills for the team lead and every worker role "
-          f"({', '.join(playbook.roles())}).")
-    print("If you install them, they apply to every project on this machine. Nothing is added to your repositories.")
-    print("The team lead then follows its guide from its first response, including ordinary discussion.")
-    for provider in providers:
-        print(f"  {provider}: {Path(homes[provider]) / 'skills' / (playbook_skills.PREFIX + 'ROLE') / 'SKILL.md'}")
-    print("Each Boat worker VM also receives its own role's guide in its provider instruction file "
-          "(~/.codex/AGENTS.md or ~/.claude/CLAUDE.md on the VM). Files you created yourself are never replaced.")
-    print(f"Press Enter to keep {keep}.")
+def describe(attachment):
+    if attachment is None:
+        return "none (the team lead briefs every worker itself)"
+    try:
+        package = playbook.load(attachment["path"])
+    except playbook.PlaybookError as error:
+        return f"cannot be read: {error}"
+    return (package.label() + (f", model set {attachment['model_set']}" if attachment["model_set"] else ", no model set")
+            + (f", team lead follows {attachment['lead_role']}" if attachment["lead_role"] else ", no role for the team lead"))
+
+
+def menu_choice(reply, names):
+    """Displayed numbers select by position, including when a package uses numeric names."""
+    for position, name in enumerate(names, start=1):
+        if reply == str(position):
+            return name
+    return reply if reply in names else None
+
+
+def choose_lead_role(package, current):
+    """Ask which of the package's roles the T3 team lead follows, if any. Only an earlier choice is a default:
+    no role name means anything to T3 Boat."""
+    roles = list(package.roles)
+    default = current if current in roles else None
+    print(f"Roles of {package.name}: " + ", ".join(f"{n}. {role}" for n, role in enumerate(roles, start=1)))
     while True:
-        reply = input(f"Install the agent-playbook skills on this machine? [{'Y/n' if current else 'y/N'}] ").strip().lower()
-        if reply in ("", "y", "yes", "n", "no"):
-            break
-        print("Answer y or n.")
-    install = reply in ("y", "yes") or (not reply and current)
-    write(playbook_skills.state_path(Path.home()), "yes\n" if install else "no\n")
-    print("Agent-playbook skills will be installed." if install else
-          "Agent-playbook skills are not installed. Rerun setup to add them later.")
+        reply = input("Role the T3 team lead follows ('none' for no role)"
+                      + (f" [{default}]: " if default else ": ")).strip()
+        if not reply and default:
+            return default
+        if reply.lower() == "none":
+            return None
+        chosen = menu_choice(reply, roles)
+        if chosen:
+            return chosen
+        print("Select a listed role by number or name, or 'none'.")
+
+
+def choose_model_set(profile, package, current):
+    """Ask which of the package's model sets assigns this profile's models, or None ('none', or none fits).
+    Only an earlier choice is a default: no set name means anything to T3 Boat."""
+    if not package.model_set_paths:
+        print(f"{package.name} declares no model sets; the team lead chooses each worker's model.")
+        return None
+    fitting = package.fitting_sets(boat_profile.PROVIDERS[profile])
+    other = [name for name in package.model_set_paths if name not in fitting]
+    if other:
+        print(f"Model sets that need a provider {profile} does not enable: {', '.join(other)}.")
+    if not fitting:
+        print(f"No model set of {package.name} fits {profile}; the team lead chooses each worker's model.")
+        return None
+    default = current if current in fitting else None
+    print(f"Model sets of {package.name} for {profile}:")
+    for number, name in enumerate(fitting, start=1):
+        print(f"  {number}. {name}")
+    while True:
+        reply = input("Model set ('none' to let the team lead choose each worker's model)"
+                      + (f" [{default}]: " if default else ": ")).strip()
+        if reply.lower() == "none":
+            return None
+        chosen = default if not reply else menu_choice(reply, fitting)
+        if chosen:
+            return chosen
+        print("Select a listed model set by number or name, or 'none'.")
+
+
+def choose_playbook(profile, current):
+    """Ask whether to attach an external playbook package. Returns (attachment to save, loaded package), or
+    (None, None).
+
+    Entering `agent-playbook` downloads the suggested package at its pinned commit into /data/teams, as data,
+    and attaches it like any other path; nothing is downloaded unless the owner enters it. A failed download
+    leaves the current choice in place and asks again.
+
+    The package is the read the owner saw here: its roles, counts and model sets. Setup passes it on, so the model
+    suggestion and every generated file describe that same release even if the path is switched to another one
+    while the owner answers. The attachment keeps the path as entered (for example a link to the current
+    release), so a later container start or setup deliberately reads what it names then.
+    Nothing is saved here: the attachment is saved with the lead model, once the owner accepts it.
+    """
+    bundled = None
+    try:
+        bundled = playbook.load(str(playbook.BUNDLED))
+    except playbook.PlaybookError:
+        pass
+    print("A playbook is an optional external package of role guides and model sets (a team.json manifest). "
+          "Attached, it decides the team's roles, their instructions, counts and models; without one the team lead "
+          "briefs every worker itself. It applies to every project of this profile; nothing is added to your "
+          "repositories.")
+    print(f"Current playbook: {describe(current)}")
+    teams = Path.home() / "teams"
+    pin = playbook_pin.PIN
+    suggested = playbook_fetch.destination(teams)
+    print(f"Suggested: agent-playbook, {playbook_fetch.URL} at commit {pin.commit[:12]}. Enter "
+          f"'agent-playbook' to download that commit into {suggested} and attach it; it is read as data and nothing "
+          "from it runs here. Nothing is downloaded unless you enter it.")
+    choices = "Enter to keep it, 'none' to detach" if current else "Enter for none"
+    choices += ", 'agent-playbook' for the suggested playbook"
+    if bundled:
+        choices += f", 'bundled' for {bundled.label()}"
+    choices += ", or the absolute path of a package directory in the container (for example under /data/teams)"
+    print(choices + ".")
+    while True:
+        reply = input("Playbook: ").strip()
+        package = None
+        if not reply:
+            if current is None:
+                return None, None
+            path = current["path"]
+        elif reply.lower() == "none":
+            return None, None
+        elif reply.lower() == "bundled" and bundled:
+            path = str(bundled.root)
+        elif reply.lower() == "agent-playbook":
+            other = "Enter to keep the current playbook, 'none' to detach it" if current else "Enter for none"
+            if suggested.exists() or suggested.is_symlink():
+                print(f"Checking {suggested} against the pinned commit {pin.commit} (offline) ...", flush=True)
+            else:
+                print(f"Downloading {playbook_fetch.URL} at commit {pin.commit} ...", flush=True)
+            try:
+                package = playbook_fetch.load(teams)  # Checked against the pin in the read that is applied.
+            except playbook_fetch.Mismatch as error:
+                print(f"agent-playbook was not attached: {error}. Nothing was changed, and the folder was left as "
+                      f"it is. Enter its path to attach it as your own package (shown as unverified), "
+                      f"move it away and enter 'agent-playbook' to download the pinned commit again, {other}, or "
+                      "the path of another package directory in the container.")
+                continue
+            except playbook_fetch.FetchError as error:
+                print(f"agent-playbook could not be downloaded: {error}. Nothing was changed. Check this server's "
+                      f"network and enter 'agent-playbook' to retry, {other}, or the path of a package directory "
+                      "in the container.")
+                continue
+        else:
+            path = reply
+        if package is None:
+            try:
+                package = playbook.load(path)
+            except playbook.PlaybookError as error:
+                print(f"{error}. Enter another path, or 'none'.")
+                continue
+        print(f"Attaching {package.label()}: roles " + ", ".join(
+            f"{role} ({spec['instances']})" for role, spec in package.roles.items()) + ".")
+        same = current is not None and Path(current["path"]) == package.root
+        lead_role = choose_lead_role(package, current["lead_role"] if same else None)
+        model_set = choose_model_set(profile, package, current["model_set"] if same else None)
+        return {"path": str(package.root), "model_set": model_set, "lead_role": lead_role}, package
 
 
 def setup(profile, providers):
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
-    # Name an unreadable or incomplete saved profile before installing anything or asking for a sign-in.
-    path = Path.home() / "profiles" / (profile + ".json")
+    # Name an unreadable saved profile before installing anything or asking for a sign-in. An attached package
+    # that cannot be read is not an error here: setup asks for the playbook again.
     try:
-        rows = saved_assignments(path)
-    except OSError as error:
-        raise ProfileError(f"{path}: {error.strerror or error}") from None
-    if rows is not MISSING:
-        try:
-            role_profile.check_roles(rows)
-        except role_profile.ProfileError as error:
-            raise ProfileError(f"{path}: {error}") from None
+        state = read_state(profile, missing=None)
+    except boat_profile.ProfileError as error:
+        raise ProfileError(str(error)) from None
     for provider in providers:
         if provider == "claude":
             run("install-claude")
@@ -266,8 +373,8 @@ def setup(profile, providers):
                 run("claude", "auth", "login")
             if not logged_in(provider):
                 raise SetupError(f"A {provider} subscription login is required. Rerun setup to resume.")
-    choose_playbook(providers)
-    configure_roles(profile)
+    attachment, package = choose_playbook(profile, state and state.get("playbook"))
+    configure(profile, attachment, package)
     existing = projects()
     optional = " (Enter to resume existing projects)" if existing else " (Enter to start with an idea)"
     url = input(f"GitHub repository URL{optional}: ").strip()
@@ -330,6 +437,8 @@ def status(profile, providers):
     report("T3 HTTP server", t3_online())
     problem = None
     try:
+        state = read_state(profile, missing=None)
+        print("Playbook: " + describe(state and state.get("playbook")))
         lead = parent_role(profile)
         t3_home = Path(os.environ.get("T3CODE_HOME") or Path.home() / ".t3")
         settings = json.loads((t3_home / "userdata/settings.json").read_text())
@@ -341,8 +450,9 @@ def status(profile, providers):
                   and selection.get("model") == lead["model"]
                   and {"id": option, "value": lead["effort"]} in selection.get("options", [])
                   and all(instances.get(p, {}).get("enabled") is (p in expected) for p in ("codex", "claudeAgent"))
-                  and settings.get("linkedEnvironmentsEnabled") is True)
-    except ProfileError as error:
+                  and settings.get("linkedEnvironmentsEnabled") is True
+                  and boat_profile.applied(profile))
+    except (ProfileError, boat_profile.ProfileError, playbook.PlaybookError) as error:
         active, problem = False, error
     except (OSError, ValueError, KeyError, TypeError, SetupError):
         active = False
@@ -368,9 +478,10 @@ def status(profile, providers):
                 env = env_for(envs, label)
                 credential = check_access(env, profiles, providers)
                 record = read_receipt(profile, slug)
+                signature = check_signature(profile, env, credential)
                 report(f"{env['name']}: last successful VM check for {slug or profile} "
                        f"({record.get('checked', 'never')})",
-                       record.get("signature") == check_signature(profile, env, credential))
+                       signature is not None and record.get("signature") == signature)
                 if slug:
                     report(f"{slug} attached to {env['name']}", has_repo(env, slug))
             except SetupError as error:
@@ -381,7 +492,7 @@ def status(profile, providers):
     if failures:
         print("Next: docker exec -it t3-boat t3-boat setup")
         return 1
-    print("Setup verified. Push and pull-request permissions are exercised on your first change.")
+    print("Setup verified. Repository write access is first used when a worker delivers a change.")
     return 0
 
 
@@ -393,7 +504,7 @@ def main():
     if profile not in PROFILES:
         parser.error("set T3_BOAT_PROFILE to " + ", ".join(PROFILES))
     if args.command == "serve":
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/role_profile.py"), profile],
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/boat_profile.py"), profile],
                                 stderr=subprocess.PIPE, text=True)
         if result.returncode:
             *earlier, detail = result.stderr.rstrip("\n").split("\n")
@@ -403,6 +514,8 @@ def main():
             sys.stderr.write(result.stderr)
             sys.exit(result.returncode)
         sys.stderr.write(result.stderr)
+        # Where the README copies an owner's own playbook package: `docker cp` needs the parent directory.
+        (Path.home() / "teams").mkdir(exist_ok=True)
         os.chdir(Path.home())
         os.execvp("t3", ["t3", "--no-browser", "--host", "0.0.0.0", "--port", "3773"])
     if args.command == "setup":
@@ -416,7 +529,7 @@ if __name__ == "__main__":
     os.umask(0o077)
     try:
         sys.exit(main())
-    except (ProfileError, role_profile.ProfileError) as error:
+    except (ProfileError, boat_profile.ProfileError) as error:
         # The message names the file to repair; rerunning setup first would fail the same way.
         sys.exit(f"T3 Boat profile: {error}")
     except (SetupError, ValueError, EOFError, OSError, KeyboardInterrupt) as error:

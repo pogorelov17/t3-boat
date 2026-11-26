@@ -1,211 +1,331 @@
-"""Read the pinned agent-playbook: its roles, role bundles, model sets and model rules.
+"""Read an external playbook package that the owner attached in setup.
 
-The playbook is fetched at a fixed commit by scripts/fetch-playbook and read offline. Every path comes
-from its team.json manifest, so the layout of role folders inside the playbook does not matter here.
+A playbook is a directory with a `team.json` manifest (schema 1, the format of agent-playbook): its roles, the
+ordered instruction files ("bundle") of each role, how many instances of each it runs, and optional model sets.
+T3 Boat reads the package as data and never runs code from it. Role names, counts, model assignments, model
+rules and every instruction belong to the package; nothing here knows a role by name.
+
+Loading reads and checks every file the manifest names, in full, before anything is generated from it, and keeps
+the contents in memory: every guide, skill and worker instruction made from one loaded package comes from the
+same read, even while the owner edits the directory.
+
+A package names a commit only when its whole folder holds the suggested playbook's pinned release
+(playbook_pin.check) and every file this read used has the pinned content. Any other `.commit` file is shown as
+an unverified claim.
 """
+import hashlib
 import json
 import os
 import re
-from functools import lru_cache
+import stat
 from pathlib import Path
 
+import playbook_pin
+
 ROOT = Path(__file__).resolve().parents[1]
-# Playbook provider names and the T3 provider instance each one runs on, in display order.
+# A copy of agent-playbook that an image built with BUNDLE_PLAYBOOK=1 contains (scripts/fetch-playbook); setup
+# offers it as "bundled" only when it is there. The default image has none and never fetches one on its own; setup
+# downloads the suggested one into the volume only when the owner selects it (playbook_fetch.py).
+BUNDLED = ROOT / "playbook"
+# Package provider names and the T3 provider instance each one runs on, in display order.
 PROVIDER_IDS = {"codex": "codex", "claude": "claudeAgent"}
-NAME = re.compile(r"[a-z][a-z0-9-]*")
+# Role and package names: anything a shell argument and a file name can carry unquoted. Skill folders use slug().
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+TEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:_/+-]*")
+# Size limits, in bytes, checked when the package is read and so before any file is generated or any VM created.
+MAX_FILE = 1 << 20      # One file of the package.
+MAX_GUIDE = 1 << 20     # One role's assembled guide, which a worker VM receives.
+MAX_PACKAGE = 8 << 20   # Every file the manifest names, together.
+READS = 3               # Attempts at reading an unchanged package while it is being edited.
+
+
+def slug(name):
+    """A skill-safe form of a name: lowercase letters, digits and hyphens."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "x"
+
+
+def skill_name(package_name, role):
+    """A role guide's skill name: `playbook-PACKAGE-ROLE-HASH`. Generated guides share the `playbook-` prefix, so no
+    package or role name can produce the Boat skill's own name (`t3-boat`). The readable parts are shortened slugs;
+    the hash of the exact names keeps them distinct, so `qa_bot` and `QA-bot` get separate skills. The result has
+    at most 64 lowercase letters, digits and single hyphens."""
+    digest = hashlib.sha256(json.dumps([package_name, role]).encode()).hexdigest()[:8]
+    return "-".join(("playbook", slug(package_name)[:16].strip("-"), slug(role)[:28].strip("-"), digest))
 
 
 class PlaybookError(ValueError):
-    """The playbook in this installation is missing or malformed; the message names the file."""
+    """The attached package is missing or malformed; the message names the file."""
 
 
-def location():
-    return Path(os.environ.get("T3_BOAT_PLAYBOOK") or ROOT / "playbook")
+class NotRegularFile(OSError):
+    """A path that is a FIFO, device, socket or directory where a regular file is expected."""
 
 
-def _json(path):
+def read_regular(path, limit=-1):
+    """Read up to `limit` bytes of a regular file; anything else raises NotRegularFile without blocking.
+
+    The file is opened non-blocking and checked on the open descriptor, so a FIFO put at the path, even after an
+    earlier check, is refused at once instead of waiting for a writer.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise PlaybookError(f"{path} is missing. Fetch the pinned playbook with scripts/fetch-playbook "
-                            f"{location()}") from None
-    except (OSError, ValueError) as error:
-        raise PlaybookError(f"{path}: {error}") from None
+        regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    if not regular:
+        os.close(descriptor)
+        raise NotRegularFile(f"{path} is not a regular file")
+    with os.fdopen(descriptor, "rb") as handle:
+        return handle.read(limit)
 
 
-def _inside(rel):
-    """Resolve a manifest path inside the playbook; anything else is an error naming the manifest."""
-    base = location().resolve()
-    path = (base / rel).resolve()
-    if not isinstance(rel, str) or not rel or rel.startswith("/") or base not in path.parents:
-        raise PlaybookError(f"{location() / 'team.json'}: path {rel!r} is outside the playbook")
-    return path
+def _unique_members(pairs):
+    members = {}
+    for key, value in pairs:
+        if key in members:
+            raise ValueError(f"duplicate JSON member {ascii(key)}")
+        members[key] = value
+    return members
 
 
-@lru_cache(maxsize=None)
-def manifest():
-    path = location() / "team.json"
-    data = _json(path)
-    if not isinstance(data, dict) or data.get("schema") != 1:
-        raise PlaybookError(f"{path}: expected a schema 1 team description")
-    roles, sets = data.get("roles"), data.get("model_sets")
-    if not isinstance(roles, dict) or "lead" not in roles or not isinstance(sets, dict) or not sets:
-        raise PlaybookError(f"{path}: expected roles including lead, and model_sets")
-    for role, spec in roles.items():
-        if (not NAME.fullmatch(role) or not isinstance(spec, dict)
-                or not isinstance(spec.get("instances"), int) or isinstance(spec.get("instances"), bool)
-                or spec["instances"] < 1 or not isinstance(spec.get("bundle"), list) or not spec["bundle"]
-                or not all(isinstance(rel, str) for rel in spec["bundle"])):
-            raise PlaybookError(f"{path}: role {role!r} needs a name, a positive instances count and a bundle")
-    if roles["lead"]["instances"] != 1:
-        raise PlaybookError(f"{path}: the lead has exactly one instance")
-    for name, rel in sets.items():
-        if not NAME.fullmatch(name.replace("+", "-")) or not isinstance(rel, str):
-            raise PlaybookError(f"{path}: invalid model set {name!r}")
-    rules = data.get("model_rules", [])
-    if not isinstance(rules, list) or not all(
-            isinstance(rule, dict) and isinstance(rule.get("roles"), list)
-            and set(rule["roles"]) | {rule.get("must_differ_from")} <= set(roles) for rule in rules):
-        raise PlaybookError(f"{path}: model_rules must name roles of the team")
-    return data
+def _entries(value):
+    return [value] if isinstance(value, dict) else value
 
 
-def commit():
-    try:
-        return (location() / ".commit").read_text().strip() or "unknown"
-    except OSError:
-        return "unknown"
+def _text_field(entry, key):
+    value = entry.get(key)
+    return isinstance(value, str) and bool(TEXT.fullmatch(value.strip()))
 
 
-def roles():
-    return list(manifest()["roles"])
+class Package:
+    """One validated package directory, read in full. Every path a manifest names must stay inside it."""
 
-
-def keys(role):
-    """The profile rows for one playbook role: its name, or name1..nameN for several instances."""
-    count = manifest()["roles"][role]["instances"]
-    return [role] if count == 1 else [f"{role}{number}" for number in range(1, count + 1)]
-
-
-def role_keys():
-    return [key for role in roles() for key in keys(role)]
-
-
-def role_of(key):
-    """Map a profile row to its playbook role, or None for a row the playbook does not define."""
-    for role in roles():
-        if key in keys(role):
-            return role
-    return None
-
-
-def profile_names():
-    return list(manifest()["model_sets"])
-
-
-@lru_cache(maxsize=None)
-def model_set(name):
-    rel = manifest()["model_sets"].get(name)
-    if rel is None:
-        raise PlaybookError("T3_BOAT_PROFILE must be one of: " + ", ".join(profile_names()))
-    path = _inside(rel)
-    data = _json(path)
-    assignments = data.get("roles") if isinstance(data, dict) else None
-    if not isinstance(assignments, dict):
-        raise PlaybookError(f"{path}: expected roles")
-    for role in roles():
-        entries = assignments.get(role)
-        entries = [entries] if isinstance(entries, dict) else entries
-        if (not isinstance(entries, list) or len(entries) != manifest()["roles"][role]["instances"]
-                or not all(isinstance(e, dict) and e.get("provider") in PROVIDER_IDS
-                           and all(isinstance(e.get(k), str) and e[k].strip() for k in ("family", "effort"))
-                           for e in entries)):
-            raise PlaybookError(f"{path}: role {role} needs one provider, family and effort per instance")
-    return data
-
-
-def _entries(name, role):
-    entries = model_set(name)["roles"][role]
-    return [entries] if isinstance(entries, dict) else entries
-
-
-def providers(name):
-    """The T3 provider instances a model set uses, in display order."""
-    used = {entry["provider"] for role in roles() for entry in _entries(name, role)}
-    return tuple(PROVIDER_IDS[p] for p in PROVIDER_IDS if p in used)
-
-
-def profiles():
-    return {name: providers(name) for name in profile_names()}
-
-
-def templates(name):
-    """Default rows for a model set: provider instance, model family and effort for every role instance."""
-    rows = {}
-    for role in roles():
-        for key, entry in zip(keys(role), _entries(name, role)):
-            rows[key] = {"provider": PROVIDER_IDS[entry["provider"]], "model": entry["family"].strip(),
-                         "effort": entry["effort"].strip()}
-    return rows
-
-
-def rules(name):
-    """Yield (row, other row, family allowed to be shared or None) for every model rule of a set."""
-    exceptions = {}
-    for exception in model_set(name).get("exceptions", []):
-        role, number = exception.get("role"), exception.get("instance")
-        if role in manifest()["roles"] and isinstance(number, int) and 1 <= number <= len(keys(role)):
-            family = _entries(name, role)[number - 1]["family"].strip().casefold()
-            exceptions[(keys(role)[number - 1], exception.get("must_differ_from"))] = family
-    for rule in manifest().get("model_rules", []):
-        other_role = rule["must_differ_from"]
-        for role in rule["roles"]:
-            for key in keys(role):
-                for other in keys(other_role):
-                    yield key, other, exceptions.get((key, other_role))
-
-
-def rule_lines(name):
-    """The model rules of a set as Markdown list items, for the installed workflow skill."""
-    lines = []
-    for rule in manifest().get("model_rules", []):
-        rows = [f"`{key}`" for role in rule["roles"] for key in keys(role)]
-        listed = rows[0] if len(rows) == 1 else ", ".join(rows[:-1]) + " and " + rows[-1]
-        other = " or ".join(f"`{key}`" for key in keys(rule["must_differ_from"]))
-        lines.append(f"- {listed} run on a model other than the {other} model and other than every model that "
-                     "authored commits on the PR in any round. A model is its provider plus family; a different "
-                     "effort does not make it a different model.")
-    exceptions = []
-    for exception in model_set(name).get("exceptions", []):
-        role, number = exception.get("role"), exception.get("instance")
-        if role in manifest()["roles"] and isinstance(number, int) and 1 <= number <= len(keys(role)):
-            family = _entries(name, role)[number - 1]["family"].strip()
-            reason = exception.get("reason")
-            exceptions.append(f"- The only exception, declared by `{name}`: `{keys(role)[number - 1]}` may use the "
-                              f"{family} family of `{exception.get('must_differ_from')}` at a different effort, on "
-                              "its own fresh VM."
-                              + (f" Reason: {reason}" if isinstance(reason, str) else ""))
-    return lines + (exceptions or [f"- `{name}` declares no exception."])
-
-
-@lru_cache(maxsize=None)
-def bundle(role):
-    """The role's instruction text, assembled as the playbook's own `check.py --print` does."""
-    parts = []
-    for rel in manifest()["roles"][role]["bundle"]:
-        path = _inside(rel)
+    def __init__(self, path, pin=None):
+        if not isinstance(path, (str, Path)) or not Path(path).is_absolute():
+            raise PlaybookError(f"{path}: enter an absolute directory path")
+        self.root = Path(path)
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+            directory = self.root.is_dir()
+            self.base = self.root.resolve() if directory else None
+        except (OSError, ValueError, RuntimeError) as error:
             raise PlaybookError(f"{path}: {error}") from None
-        parts.append(f"<!-- file: {rel} -->\n{text if text.endswith(chr(10)) else text + chr(10)}")
-    return "\n".join(parts)
+        if not directory:
+            raise PlaybookError(f"{path} is not a directory")
+        self.manifest_path = self.base / "team.json"
+        for _ in range(READS):
+            self._read = {}
+            self._paths = {}
+            self._parse()
+            if (all(self._bytes(path, again=True) == data for path, data in self._read.items())
+                    and all(self._resolve(rel) == path for rel, path in list(self._paths.items()))):
+                break
+        else:
+            raise PlaybookError(f"{self.manifest_path}: the package kept changing while it was read; "
+                                "finish editing it and try again")
+        used = {path.relative_to(self.base).as_posix(): hashlib.sha256(data).hexdigest()
+                for path, data in self._read.items()}
+        del self._read, self._paths
+        # The pinned commit, only when this folder and the bytes read here are that release; otherwise the
+        # differences from it, when the folder's `.commit` claims it.
+        self.pin, self.differences = None, []
+        pin = pin or playbook_pin.PIN
+        if self.commit == pin.commit:
+            differences, digests = playbook_pin.check(self.base, pin)
+            if not differences and all(digests.get(rel) == digest for rel, digest in used.items()):
+                self.pin = pin.commit
+            else:
+                self.differences = differences or ["it changed while it was read"]
+
+    # Reading. Every file is read once per attempt, then read again to confirm nothing changed in between.
+
+    def _bytes(self, path, again=False):
+        if not again and path in self._read:
+            return self._read[path]
+        try:
+            data = read_regular(path, MAX_FILE + 1)
+        except FileNotFoundError:
+            if again:
+                return None
+            raise PlaybookError(f"{path} is missing") from None
+        except NotRegularFile:
+            if again:
+                return None
+            raise PlaybookError(f"{path} is not a regular file") from None
+        except (OSError, ValueError) as error:
+            if again:
+                return None
+            raise PlaybookError(f"{path}: cannot be read: {getattr(error, 'strerror', None) or error}") from None
+        if again:
+            return data
+        if len(data) > MAX_FILE:
+            raise PlaybookError(f"{path}: larger than {MAX_FILE} bytes, the limit for one package file")
+        if sum(map(len, self._read.values())) + len(data) > MAX_PACKAGE:
+            raise PlaybookError(f"{self.manifest_path}: the files it names exceed {MAX_PACKAGE} bytes together")
+        self._read[path] = data
+        return data
+
+    def _text(self, path):
+        data = self._bytes(path)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise PlaybookError(f"{path}: not UTF-8 text ({error})") from None
+        if "\0" in text:  # A shell script, and so a worker's bootstrap, cannot carry a NUL byte.
+            raise PlaybookError(f"{path}: contains a NUL byte at offset {data.index(0)}; package files must be text")
+        return text
+
+    def _json(self, path):
+        text = self._text(path)  # Its own errors already name the file.
+        try:
+            data = json.loads(text, object_pairs_hook=_unique_members)
+            # JSON escapes can decode to a lone surrogate even when the source file is valid UTF-8.
+            json.dumps(data, ensure_ascii=False).encode("utf-8")
+            return data
+        except UnicodeEncodeError:
+            raise PlaybookError(f"{path}: JSON contains an unpaired Unicode surrogate") from None
+        except (ValueError, RecursionError) as error:
+            raise PlaybookError(f"{path}: {error if isinstance(error, ValueError) else 'nested too deeply'}") from None
+
+    def _resolve(self, rel):
+        """Pin each package-relative path to a target inside the resolved release directory."""
+        try:
+            path = (self.base / rel).resolve() if isinstance(rel, str) and rel and not rel.startswith("/") else None
+            inside = path is not None and self.base in path.parents
+        except (OSError, ValueError, RuntimeError) as error:
+            raise PlaybookError(f"{self.manifest_path}: path {rel!r} cannot be resolved: "
+                                f"{getattr(error, 'strerror', None) or error}") from None
+        if not inside:
+            raise PlaybookError(f"{self.manifest_path}: path {rel!r} is outside the package")
+        self._paths.setdefault(rel, path)
+        return path
+
+    def _file(self, rel):
+        path = self._resolve(rel)
+        try:
+            regular = path.is_file()
+        except OSError as error:
+            raise PlaybookError(f"{self.manifest_path}: {rel!r}: {error.strerror}") from None
+        if not regular:
+            raise PlaybookError(f"{self.manifest_path}: {rel} is not a file in the package")
+        return path
+
+    def _parse(self):
+        manifest_path = self.manifest_path
+        data = self._json(self._resolve("team.json"))
+        if not isinstance(data, dict) or data.get("schema") != 1:
+            raise PlaybookError(f"{manifest_path}: expected a schema 1 team description")
+        roles = data.get("roles")
+        if not isinstance(roles, dict) or not roles:
+            raise PlaybookError(f"{manifest_path}: expected a non-empty roles object")
+        self.roles, self._bundles, self._summaries = {}, {}, {}
+        for role, spec in roles.items():
+            count = spec.get("instances") if isinstance(spec, dict) else None
+            bundle = spec.get("bundle") if isinstance(spec, dict) else None
+            if (not NAME.fullmatch(role) or not isinstance(count, int) or isinstance(count, bool) or count < 1
+                    or not isinstance(bundle, list) or not bundle or not all(isinstance(rel, str) for rel in bundle)):
+                raise PlaybookError(f"{manifest_path}: role {role!r} needs a name of letters, digits, '.', '_' or "
+                                    "'-', a positive instances count and a non-empty bundle of file paths")
+            self.roles[role] = {"instances": count, "bundle": list(bundle)}
+            texts = [self._text(self._file(rel)) for rel in bundle]
+            self._bundles[role] = "\n".join(f"<!-- file: {rel} -->\n{text if text.endswith(chr(10)) else text + chr(10)}"
+                                            for rel, text in zip(bundle, texts))
+            size = len(self._bundles[role].encode())
+            if size > MAX_GUIDE:
+                raise PlaybookError(f"{manifest_path}: the {role} guide is {size} bytes, over the {MAX_GUIDE}-byte "
+                                    "limit for what one worker receives; shorten its bundle")
+            match = re.search(r"^## Who you are\n+(.+?)(?:\n\n|\Z)", texts[0], re.MULTILINE | re.DOTALL)
+            sentence = re.split(r"(?<=[.!?])\s", " ".join(match[1].split()) if match else "", maxsplit=1)[0]
+            self._summaries[role] = sentence[:300]
+        name = data.get("name")
+        self.name = name if isinstance(name, str) and NAME.fullmatch(name) else "playbook"
+        skills = {}
+        for role in self.roles:
+            other = skills.setdefault(skill_name(self.name, role), role)
+            if other != role:  # A hash collision: vanishingly rare, but never install one guide over another.
+                raise PlaybookError(f"{manifest_path}: roles {other!r} and {role!r} share a skill name; rename one")
+        version = data.get("version")
+        self.version = version if isinstance(version, str) and TEXT.fullmatch(version) else None
+        commit_path = self._resolve(".commit")
+        try:
+            commit = read_regular(commit_path, 128).decode("ascii", errors="replace").strip()
+        except (OSError, ValueError):
+            commit = ""
+        self.commit = commit if re.fullmatch(r"[0-9a-f]{7,64}", commit) else None
+        rules = data.get("model_rules", [])
+        if not isinstance(rules, list):
+            raise PlaybookError(f"{manifest_path}: model_rules must be a list")
+        self.model_rules = rules
+        sets = data.get("model_sets", {})
+        if not isinstance(sets, dict) or not all(isinstance(v, str) for v in sets.values()):
+            raise PlaybookError(f"{manifest_path}: model_sets must map names to file paths")
+        self.model_set_paths = dict(sets)
+        self._sets = {name: self._model_set(name, rel) for name, rel in sets.items()}
+
+    def _model_set(self, name, rel):
+        """A model set's role assignments as {role: [entry, ...]}, each entry with provider, family and effort.
+
+        Only the shape T3 Boat displays is checked; whether the set covers every role, and every rule between
+        roles, is the package's own business.
+        """
+        path = self._file(rel)
+        data = self._json(path)
+        assignments = data.get("roles") if isinstance(data, dict) else None
+        if not isinstance(assignments, dict) or not assignments:
+            raise PlaybookError(f"{path}: expected roles")
+        result = {}
+        for role, value in assignments.items():
+            entries = _entries(value)
+            if (not isinstance(entries, list) or not entries or not all(
+                    isinstance(e, dict) and isinstance(e.get("provider"), str) and e["provider"] in PROVIDER_IDS
+                    and _text_field(e, "family") and _text_field(e, "effort") for e in entries)):
+                raise PlaybookError(f"{path}: role {role!r} needs a provider ({', '.join(PROVIDER_IDS)}), "
+                                    "family and effort for each entry")
+            result[role] = [{"provider": PROVIDER_IDS[e["provider"]], "family": e["family"].strip(),
+                             "effort": e["effort"].strip()} for e in entries]
+        exceptions = data.get("exceptions", [])
+        if not isinstance(exceptions, list):
+            raise PlaybookError(f"{path}: exceptions must be a list")
+        return {"roles": result, "exceptions": exceptions, "path": path}
+
+    # The loaded package, from memory only.
+
+    def label(self, where=True):
+        """How setup, status and the skill name this package; `where` adds its directory on this server. A commit
+        is named as such only when it was verified against the pin; any other `.commit` is marked unverified."""
+        commit = ("commit " + self.pin[:12] if self.pin else
+                  self.commit and "unverified commit " + self.commit[:12])
+        detail = ", ".join(part for part in (self.version and "version " + self.version, commit) if part)
+        return f"{self.name}" + (f" ({detail})" if detail else "") + (f" at {self.root}" if where else "")
+
+    def bundle(self, role):
+        """A role's instruction text: its bundle files in order, each after a comment naming it, as the
+        agent-playbook checker's `--print ROLE` assembles them."""
+        return self._bundles[role]
+
+    def summary(self, role):
+        """The first sentence under a `## Who you are` heading of the role's first file, when it has one."""
+        return self._summaries[role]
+
+    def model_set(self, name):
+        if name not in self._sets:
+            raise PlaybookError(f"{self.manifest_path}: no model set {name!r}")
+        return self._sets[name]
+
+    def set_providers(self, name):
+        used = {e["provider"] for entries in self.model_set(name)["roles"].values() for e in entries}
+        return tuple(p for p in PROVIDER_IDS.values() if p in used)
+
+    def fitting_sets(self, enabled):
+        """The model sets whose every provider is enabled in this T3 Boat profile."""
+        return [name for name in self.model_set_paths if set(self.set_providers(name)) <= set(enabled)]
+
+    def entry(self, name, role):
+        """A model set's first entry for `role`, if the set assigns one."""
+        entries = self.model_set(name)["roles"].get(role) if name and role else None
+        return entries[0] if entries else None
 
 
-def summary(role):
-    """The first sentence of the role's `## Who you are` section, for a skill description."""
-    first = manifest()["roles"][role]["bundle"][0]  # A bundle always starts with the role's ROLE.md.
-    text = _inside(first).read_text(encoding="utf-8")
-    match = re.search(r"^## Who you are\n+(.+?)(?:\n\n|\Z)", text, re.MULTILINE | re.DOTALL)
-    sentence = re.split(r"(?<=[.!?])\s", " ".join(match[1].split()) if match else "", maxsplit=1)[0]
-    return sentence[:300]
+def load(path, pin=None):
+    """Read a package; `pin` is the release its `.commit` is checked against (by default playbook_pin.PIN)."""
+    return Package(path, pin)

@@ -15,11 +15,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import playbook_skills
-from role_profile import PARENT, PROVIDERS, OPTION, read_profile
+from boat_profile import MISSING, PARENT, PROVIDERS, OPTION, ProfileError, read_applied, read_state, state_lock
+
+# The remote command that runs a setup script read from standard input. The script itself never travels in an
+# argument, so a long role guide cannot exceed the argument size limit here or on the VM.
+RUN_STDIN = "sh -c " + shlex.quote('umask 077; script=$(mktemp) || exit 1; cat > "$script" && sh "$script"; '
+                                   'status=$?; rm -f "$script"; exit "$status"')
 
 
-def output(*args):
-    return subprocess.check_output(args, text=True).strip()
+def output(*args, stdin=None):
+    return subprocess.check_output(args, text=True, input=stdin).strip()
 
 
 def subscription_check(provider):
@@ -45,11 +50,20 @@ claude auth status 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.st
 """
 
 
-def role_guide(provider, guide):
-    """Append the role's agent-playbook guide to the worker provider's global instruction file.
+# Instructions for a worker started without a playbook role: the lead's brief decides its job.
+WORKER_NOTE = f"""You are a worker on a disposable Boat VM, started by the T3 team lead. Your brief from the lead is your task; it decides what you do, what you deliver and in what form.
 
-    Codex reads a non-empty AGENTS.override.md instead of AGENTS.md, so the worker stops before the
-    guide is reported as delivered when one would hide it.
+- Do all source inspection, edits, project commands, tests, dependency installs, builds and clones here on this VM. You start in a scratch folder; a checkout can be elsewhere under your home. If the brief names a repository, verify that a local checkout's origin matches it before using it, or clone it here.
+- Publish nothing the brief does not ask for. If it leaves the form of delivery open, keep your changes on this VM and describe them in your result.
+- You may split your work further only when the brief allows it and your tools support it. Name in your result what you handed on, to whom, and what came back.
+- End with a compact result for the lead. {playbook_skills.REPORTING} Link to details instead of pasting long logs."""
+
+
+def worker_instructions(provider, guide):
+    """Append the worker's instructions (a playbook role guide or WORKER_NOTE) to its provider's global instruction file.
+
+    Codex reads a non-empty AGENTS.override.md instead of AGENTS.md. When the Boat environment provides one,
+    the instructions are appended to that file, after the owner's own text, so Codex reads both.
     """
     if guide is None:
         return ""
@@ -59,8 +73,8 @@ def role_guide(provider, guide):
         target = '"${CODEX_HOME:-$HOME/.codex}/AGENTS.md"'
         masked = """override="${CODEX_HOME:-$HOME/.codex}/AGENTS.override.md"
 if [ -f "$override" ] && [ -s "$override" ]; then
-  echo "$override on the worker VM masks the agent-playbook guide in AGENTS.md; remove it from the Boat environment" >&2
-  exit 1
+  guide=$override
+  echo "Codex reads $override on this VM; the t3-boat worker instructions are appended to it" >&2
 fi"""
     else:
         target, masked = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md"', ""
@@ -70,20 +84,26 @@ guide={target}
 mkdir -p "$(dirname "$guide")"
 if [ -s "$guide" ]; then printf '\\n\\n' >> "$guide"; fi
 printf '%s\\n' {shlex.quote(block)} >> "$guide"
-[ "$(tail -n 1 "$guide")" = {shlex.quote(end)} ] || {{ echo "The agent-playbook guide was not written to $guide" >&2; exit 1; }}
+[ "$(tail -n 1 "$guide")" = {shlex.quote(end)} ] || {{ echo "The t3-boat worker instructions were not written to $guide" >&2; exit 1; }}
 """
 
 
-def bootstrap(role, guide=None):
-    provider = role["provider"]
+def bootstrap(lead, guide, providers):
+    """The VM setup script: T3 opens with the lead model and enables every provider in `providers`."""
+    if not isinstance(guide, str) or "\0" in guide:  # A shell script cannot carry a NUL byte.
+        raise ValueError("The worker instructions contain a NUL byte or are not text, so no worker can start. "
+                         "Repair the playbook file, then restart the container or rerun t3-boat setup")
+    provider = lead["provider"]
+    providers = tuple(providers)
     settings = {
         "linkedEnvironmentsEnabled": True,
         "defaultModelSelection": {
-            "instanceId": provider, "model": role["model"],
-            "options": [{"id": OPTION[provider], "value": role["effort"]}],
+            "instanceId": provider, "model": lead["model"],
+            "options": [{"id": OPTION[provider], "value": lead["effort"]}],
         },
-        "providerInstances": {p: {"driver": p, "enabled": p == provider} for p in OPTION},
+        "providerInstances": {p: {"driver": p, "enabled": p in providers} for p in OPTION},
     }
+    checks = "".join(subscription_check("claude" if p == "claudeAgent" else p) for p in OPTION if p in providers)
     return f"""
 set -eu
 umask 077
@@ -92,19 +112,19 @@ test ! -e "$HOME/.t3/userdata/settings.json"
 mkdir -p "$HOME/.t3/userdata" "$HOME/t3-worker"
 printf '%s\\n' {shlex.quote(json.dumps(settings))} > "$HOME/.t3/userdata/settings.json"
 cd "$HOME/t3-worker"
-{subscription_check(provider)}
-{role_guide(provider, guide)}
+{checks}
+{"".join(worker_instructions(p, guide) for p in OPTION if p in providers)}
 npm install --prefix "$HOME/t3-worker-runtime" t3@0.1.11 >&2
 nohup "$HOME/t3-worker-runtime/node_modules/.bin/t3" --no-browser --host 127.0.0.1 --port 3773 --auto-bootstrap-project-from-cwd >"$HOME/t3-worker.log" 2>&1 </dev/null &
 """
 
 
-def link(vm, role, guide=None):
-    def remote(command):
-        return output("boat", "ssh", vm, command)
+def link(vm, script):
+    def remote(command, stdin=None):
+        return output("boat", "ssh", vm, command, stdin=stdin)
 
     try:
-        remote("sh -c " + shlex.quote(bootstrap(role, guide)))
+        remote(RUN_STDIN, stdin=script)
     except subprocess.CalledProcessError as error:  # The command holds the whole bootstrap script.
         raise RuntimeError(f"Worker setup on {vm} failed with exit status {error.returncode}; "
                            "see the message above") from None
@@ -132,6 +152,11 @@ def link(vm, role, guide=None):
         else:
             raise RuntimeError("T3 worker did not become ready")
         environment = str(uuid.UUID(remote('cat "$HOME/.t3/userdata/environment-id"')))
+        # T3 on the VM registers the folder it started in as its project. A repository checkout on the VM can be
+        # in another folder, so the lead resolves the project ID from this folder with t3_project_list.
+        folder = remote('cd "$HOME/t3-worker" && pwd -P')
+        if not folder.startswith("/") or "\n" in folder:
+            raise RuntimeError("Unrecognized worker project folder")
         cert = json.loads(remote('"$HOME/t3-worker-runtime/node_modules/.bin/t3" auth pairing create --ttl 2m --json'))
         token = next((cert.get(k) for k in ("credential", "pairingCode", "code", "token", "pairingToken")
                       if isinstance(cert.get(k), str)), None)
@@ -140,6 +165,7 @@ def link(vm, role, guide=None):
         subprocess.run(["t3", "environment", "link", "--from", "-", "--access", "auto"],
                        input=f"{url} {token}\n", text=True, check=True, stdout=subprocess.DEVNULL)
         print(f"Boat {vm} linked to T3 environment {environment}", flush=True)
+        print(f"Worker T3 project folder: {folder}", flush=True)
     except BaseException:
         if tunnel.poll() is None:
             tunnel.terminate()
@@ -221,9 +247,22 @@ def delete_check_vm(vm):
         time.sleep(2)
 
 
+def probe_rows(lead, profile):
+    """The row whose model checks each provider's subscription, or None for the provider CLI's default.
+
+    Every worker opens with the lead model, so it checks the lead's provider; a worker also enables the profile's
+    other providers, which their CLI default checks.
+    """
+    return {provider: lead if lead["provider"] == provider else None for provider in PROVIDERS[profile]}
+
+
 def verify(environment, slug=None):
     profile = os.environ["T3_BOAT_PROFILE"]
-    roles = read_profile(profile)
+    with state_lock():
+        state = read_state(profile)  # The check covers the lead model; the attached playbook plays no part.
+    if state is MISSING:
+        raise ProfileError("Select a model with t3-boat setup first")
+    lead = state[PARENT]
     if slug and not re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", slug):
         raise ValueError("Expected a GitHub owner/repository")
     vm = provision("t3-check-" + uuid.uuid4().hex[:12], environment)
@@ -246,22 +285,21 @@ def verify(environment, slug=None):
                   + shlex.join(["ls-remote", "https://github.com/" + slug + ".git", "HEAD"]),
                   f"Git read access to {slug}")
         prompt = "Reply with exactly BOAT_OK. Do not use tools."
-        for provider in PROVIDERS[profile]:
-            role = next((r for r in (roles["executor"], *roles.values()) if r["provider"] == provider), None)
+        for provider, row in probe_rows(lead, profile).items():
             if provider == "codex":
                 args = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", "reply"]
-                if role:
-                    args.extend(["--model", role["model"], "-c", 'model_reasoning_effort=' + json.dumps(role["effort"])])
+                if row:
+                    args.extend(["--model", row["model"], "-c", 'model_reasoning_effort=' + json.dumps(row["effort"])])
                 command = shlex.join([*args, prompt])
             else:
                 args = ["claude", "-p", "--tools", "", "--output-format", "text"]
-                if role:
-                    args.extend(["--model", role["model"], "--effort", role["effort"]])
+                if row:
+                    args.extend(["--model", row["model"], "--effort", row["effort"]])
                 command = shlex.join([*args, prompt]) + " >reply"
             script = ('export PATH="$HOME/.local/bin:$PATH"; umask 077; mkdir -p "$HOME/t3-worker"; '
                       'cd "$(mktemp -d)"; ' + subscription_check(provider) + "\n" + command
                       + "\ngrep -Fxq BOAT_OK reply")
-            label = role["model"] + " / " + role["effort"] if role else "CLI default"
+            label = row["model"] + " / " + row["effort"] if row else "CLI default"
             check(script, f"{provider} subscription reply ({label})")
     finally:
         print(f"Deleting check VM {vm}", flush=True)
@@ -269,12 +307,35 @@ def verify(environment, slug=None):
         print(f"[ok] Deleted {vm}", flush=True)
 
 
-def start(role_name):
-    profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
-    roles = read_profile(profile)
-    guide = playbook_skills.worker_guide(Path.home(), role_name) if role_name in roles else None
-    if role_name == PARENT or role_name not in roles:
-        raise ValueError("Select a child role from the active profile")
+def worker_plan(role=None):
+    """What a worker receives: (lead model row, enabled providers, label, instructions).
+
+    Without `role` the worker gets WORKER_NOTE and the lead's brief. With `role`, which must be a role of the
+    attached playbook, it gets that role's guide instead. Both come from the record of the last complete profile
+    run, read under the state lock, so a worker receives exactly the package contents the team lead's skills were
+    generated from, even while setup writes a new choice or the owner edits the package directory.
+    """
+    home = Path.home()
+    with state_lock(home):
+        profile = os.environ.get("T3_BOAT_PROFILE") or (home / "profiles/active").read_text().strip()
+        state, package = read_applied(profile)
+    lead = state[PARENT]
+    if role is None:
+        return lead, PROVIDERS[profile], "a worker", WORKER_NOTE
+    if package is None:
+        raise ValueError("No playbook is attached, so workers have no roles. Run boat-worker start without a "
+                         "role, or attach a playbook with t3-boat setup")
+    if role not in package["roles"]:
+        raise ValueError(f"{role!r} is not a role of the attached playbook {package['name']}. Its roles: "
+                         + ", ".join(package["roles"]))
+    return lead, PROVIDERS[profile], f"the {package['name']} {role} role", package["roles"][role]
+
+
+def start(role=None):
+    """Start a worker, optionally for a role of the attached playbook (see worker_plan)."""
+    # The state is read once, under its lock; provisioning runs without it, so setup is never kept waiting.
+    lead, providers, label, note = worker_plan(role)
+    script = bootstrap(lead, note, providers)  # Built before any VM exists, so a problem here costs none.
     # Only provision from a configured project stub; nothing on the host fetches origin.
     binding = subprocess.run(["git", "config", "--local", "--get", "boat.environment"],
                              text=True, capture_output=True)
@@ -282,13 +343,13 @@ def start(role_name):
     if binding.returncode or not environment or not output("git", "config", "--local", "--get", "remote.origin.url"):
         raise ValueError("Planning is ready in T3. Run t3-boat setup with a GitHub URL to enable coding on Boat.")
     name = "t3-worker-" + uuid.uuid4().hex[:12]
-    print(f"Creating Boat worker {name} for {role_name}", flush=True)
+    print(f"Creating Boat worker {name} for {label}", flush=True)
     vm = provision(name, environment)
     print(f"Boat ID: {vm}", flush=True)
     try:
-        link(vm, roles[role_name], guide)
-        if guide:
-            print(f"Installed the agent-playbook {role_name} guide on {vm}", flush=True)
+        link(vm, script)
+        if role:
+            print(f"Installed the {label} guide on {vm}", flush=True)
     except BaseException:
         subprocess.run(["boat", "delete", "--yes", vm], check=True)
         raise
@@ -296,11 +357,11 @@ def start(role_name):
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "start":
-            start(sys.argv[2])
+        if len(sys.argv) in (2, 3) and sys.argv[1] == "start":
+            start(*sys.argv[2:])
         elif len(sys.argv) in (3, 4) and sys.argv[1] == "verify":
             verify(*sys.argv[2:])
         else:
-            sys.exit("usage: boat-worker start ROLE | verify ENVIRONMENT [OWNER/REPO]")
+            sys.exit("usage: boat-worker start [ROLE] | verify ENVIRONMENT [OWNER/REPO]")
     except (ValueError, OSError, RuntimeError, KeyError, subprocess.CalledProcessError) as exc:
         sys.exit(f"Boat worker: {exc}")

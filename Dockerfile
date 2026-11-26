@@ -30,10 +30,6 @@ RUN set -eu; \
 RUN --mount=type=bind,source=scripts/install-codex,target=/tmp/install-codex \
     sh /tmp/install-codex && npm cache clean --force
 
-# Role guides, skills and model sets from agent-playbook, pinned to one commit and read offline.
-RUN --mount=type=bind,source=scripts/fetch-playbook,target=/tmp/fetch-playbook \
-    sh /tmp/fetch-playbook /opt/t3-boat/playbook && chmod -R a+rX,go-w /opt/t3-boat/playbook
-
 ENV HOME=/data \
     PATH=/opt/t3-boat/bin:/data/.local/bin:${PATH} \
     BOAT_NO_UPDATE=1 \
@@ -43,11 +39,24 @@ RUN install -d -m 700 -o node -g node /data \
 COPY bin/ /opt/t3-boat/bin/
 COPY lib/ /opt/t3-boat/lib/
 COPY --chmod=755 scripts/install-claude /usr/local/bin/install-claude
-COPY skills/t3-boat/SKILL.md /opt/t3-boat/skills/t3-boat/SKILL.md
-RUN chmod 755 /opt/t3-boat/bin/* \
+COPY skills/t3-boat/ /opt/t3-boat/skills/t3-boat/
+# COPY keeps the build checkout's modes; a restrictive umask there must not hide files from the node user.
+RUN chmod -R a+rX,go-w /opt/t3-boat/bin /opt/t3-boat/lib /opt/t3-boat/skills && chmod 755 /opt/t3-boat/bin/* \
     && ln -s /opt/t3-boat/bin/boat-worker /usr/local/bin/boat-worker \
     && ln -s /opt/t3-boat/bin/t3-boat /usr/local/bin/t3-boat \
     && ln -s /data/.local/bin/claude /usr/local/bin/claude
+
+# Optional, off by default: `--build-arg BUNDLE_PLAYBOOK=1` adds agent-playbook at the commit pinned in
+# scripts/fetch-playbook, which setup then offers as the `bundled` playbook. The default image contains no
+# playbook, and neither its build nor a running container fetches or needs one.
+ARG BUNDLE_PLAYBOOK=0
+ARG PLAYBOOK_REPOSITORY=
+RUN --mount=type=bind,source=scripts/fetch-playbook,target=/tmp/fetch-playbook \
+    case "$BUNDLE_PLAYBOOK" in 0|1) ;; *) echo 'BUNDLE_PLAYBOOK must be 0 or 1' >&2; exit 1 ;; esac; \
+    if [ "$BUNDLE_PLAYBOOK" = 1 ]; then \
+      PLAYBOOK_REPOSITORY="$PLAYBOOK_REPOSITORY" sh /tmp/fetch-playbook /opt/t3-boat/playbook \
+      && chmod -R a+rX,go-w /opt/t3-boat/playbook; \
+    fi
 USER node:node
 WORKDIR /data
 VOLUME ["/data"]

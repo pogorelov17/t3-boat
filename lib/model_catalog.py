@@ -4,7 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from role_profile import OPTION, PROVIDERS
+from boat_profile import OPTION, PROVIDERS
 
 SNAPSHOT = Path(__file__).with_name("model_snapshot.mjs")
 MODEL_ID = {
