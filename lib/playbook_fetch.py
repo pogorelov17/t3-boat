@@ -1,11 +1,12 @@
 """Download the suggested external playbook at one pinned commit, only when the owner selects it in setup.
 
 Nothing else downloads it: the default image, its build and a container start never fetch a playbook. The download
-is data only. Git fetches the pinned commit, Python writes each file of its tree as a plain file, and
-playbook.load checks the result like any other package. No code from the package runs on this server, and no
-hook, filter, link or submodule from the repository is followed. The release lands in its own folder under
-/data/teams, named after the commit, so a later setup or container start reads it from the volume without the
-network.
+is data only. Git fetches the pinned commit, Python writes each file of its tree as a plain file, the result is
+compared with the pinned file table (playbook_pin), and playbook.load checks it like any other package. No code
+from the package runs on this server, and no hook, filter, link or submodule from the repository is followed. The
+release lands in its own folder under /data/teams, named after the commit, so a later setup or container start
+reads it from the volume without the network. Reusing that folder checks every file against the pinned table
+first, offline; a folder that differs is refused and left as it is, since the owner may have edited it on purpose.
 """
 import os
 import re
@@ -15,10 +16,9 @@ import tempfile
 from pathlib import Path
 
 import playbook
+import playbook_pin
 
-URL = "https://github.com/pogorelov17/agent-playbook"
-# The same commit an image built with BUNDLE_PLAYBOOK=1 contains (scripts/fetch-playbook).
-COMMIT = "a27b16a7d6962df7b26fc3233b8503f973f8d715"
+URL = playbook_pin.URL
 REPOSITORY = URL + ".git"
 MAX_TREE = 64 << 20  # Bytes of the whole downloaded tree; the package's own limits are checked when it loads.
 TIMEOUT = 300
@@ -28,8 +28,12 @@ class FetchError(Exception):
     """The suggested playbook could not be downloaded or is not a valid package; the message says why."""
 
 
-def destination(teams, commit=None):
-    return Path(teams) / f"agent-playbook-{(commit or COMMIT)[:12]}"
+class Mismatch(FetchError):
+    """The download folder exists but does not hold the pinned release. It is left as it is; nothing is fetched."""
+
+
+def destination(teams, pin=None):
+    return Path(teams) / f"agent-playbook-{(pin or playbook_pin.PIN).commit[:12]}"
 
 
 def _git(work, *args, repository=None, commit=None):
@@ -73,26 +77,25 @@ def _write_tree(work, tree, commit):
             handle.write(data)
 
 
-def fetch(teams, repository=None, commit=None):
+def fetch(teams, repository=None, pin=None):
     """Return the folder holding the pinned release under `teams`, downloading it first if it is not there.
 
-    A folder of that name that does not hold the pinned release is never replaced: it may be the owner's.
-    Raises FetchError naming the reason; nothing is left behind by a failed download.
+    An existing folder of that name is used only if it holds exactly the pinned files (playbook_pin.check), without
+    the network; otherwise Mismatch names the differences and the folder is never changed or replaced: it may be
+    the owner's. Raises FetchError naming the reason; nothing is left behind by a failed download.
     """
     repository = repository or REPOSITORY
-    commit = commit or COMMIT
+    pin = pin or playbook_pin.PIN
+    commit = pin.commit
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise FetchError(f"{commit!r} is not a full commit ID")
     teams = Path(teams)
-    target = destination(teams, commit)
+    target = destination(teams, pin)
     if target.exists() or target.is_symlink():
-        try:
-            recorded = playbook.read_regular(target / ".commit", 128).decode("ascii", errors="replace").strip()
-        except OSError:
-            recorded = ""
-        if target.is_symlink() or not target.is_dir() or recorded != commit:
-            raise FetchError(f"{target} already exists and is not the downloaded commit {commit[:12]}; move it "
-                             "away to download again, or enter its path to attach it as your own package")
+        differences, _ = playbook_pin.check(target, pin)
+        if differences:
+            raise Mismatch(f"{target} does not hold the pinned commit {commit[:12]}: "
+                           + playbook_pin.summary(differences))
         return target
     try:
         teams.mkdir(parents=True, exist_ok=True)
@@ -106,12 +109,17 @@ def fetch(teams, repository=None, commit=None):
         fetched = _git(work, "rev-parse", "FETCH_HEAD^{commit}").decode().strip()
         if fetched != commit:  # A commit ID names its content, so this pins every file.
             raise FetchError(f"{repository} returned commit {fetched[:12]}, not the pinned {commit[:12]}")
+        tree_id = _git(work, "rev-parse", commit + "^{tree}").decode().strip()
+        if tree_id != pin.tree:
+            raise FetchError(f"commit {commit[:12]} holds tree {tree_id[:12]}, not the pinned {pin.tree[:12]}")
         tree = work / "tree"
         tree.mkdir()
         _write_tree(work, tree, commit)
         (tree / ".commit").write_text(commit + "\n")
+        if differences := playbook_pin.check(tree, pin)[0]:
+            raise FetchError(f"the download differs from the pinned file table: {playbook_pin.summary(differences)}")
         try:
-            playbook.load(str(tree))
+            playbook.load(str(tree), pin)
         except playbook.PlaybookError as error:
             raise FetchError(f"the pinned commit is not a valid playbook: {error}") from None
         try:
@@ -123,3 +131,18 @@ def fetch(teams, repository=None, commit=None):
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return target
+
+
+def load(teams, repository=None, pin=None):
+    """The pinned release as a loaded package: downloaded if needed, and verified in the very read that is applied.
+    Raises Mismatch if the folder differs from the pin, also when it changes after fetch checked it."""
+    pin = pin or playbook_pin.PIN
+    target = fetch(teams, repository, pin)
+    try:
+        package = playbook.load(str(target), pin)
+    except playbook.PlaybookError as error:
+        raise Mismatch(f"{target} does not hold the pinned commit {pin.commit[:12]}: {error}") from None
+    if package.pin != pin.commit:
+        raise Mismatch(f"{target} does not hold the pinned commit {pin.commit[:12]}: "
+                       + playbook_pin.summary(package.differences or [".commit does not name it"]))
+    return package

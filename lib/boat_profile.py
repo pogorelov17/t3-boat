@@ -273,17 +273,18 @@ def skill_occupant(base, path):
 
 
 def reconcile(writes, removals):
-    """Plan each physical file once. Providers whose configuration folders are aliased (for example
-    `~/.claude/skills` linked to `~/.codex/skills`) reach one file through two paths: the first provider that writes
-    it decides its content, and nothing that any provider writes is removed through another provider's path."""
+    """Plan each directory entry once (playbook_skills.entry). Providers whose configuration folders are aliased
+    (`~/.claude/skills` linked to `~/.codex/skills`, or both bind mounts of one host folder) reach one entry through
+    two paths: the first provider that writes it decides its content, and nothing that any provider writes is
+    removed through another provider's path."""
     unique, written = {}, set()
     for path, data in writes.items():
-        if (key := playbook_skills.physical(path)) not in written:
+        if (key := playbook_skills.entry(path)) not in written:
             written.add(key)
             unique[path] = data
     stale, seen = [], set(written)
     for path in removals:
-        if (key := playbook_skills.physical(path)) not in seen:
+        if (key := playbook_skills.entry(path)) not in seen:
             seen.add(key)
             stale.append(path)
     return unique, stale
@@ -464,7 +465,18 @@ def prepare(name, state=None, loaded=None):
             write(path, data)
         playbook_skills.remove(removals)
         if last is not None:
-            write(record, last)  # Published only after every other file is in place.
+            # Published only after every other file is in place: checked again after the removals, so a removal
+            # that reached a written file through a path the plan did not recognize never leaves a record behind.
+            for path, data in writes.items():
+                try:
+                    intact = playbook.read_regular(path) == data.encode()
+                except OSError:
+                    intact = False
+                if not intact:
+                    raise ProfileError(f"{path} does not hold what this run wrote, so the {name} profile is not "
+                                       "applied; check whether another folder is mounted or linked over it, then "
+                                       "restart the container or rerun setup")
+            write(record, last)
     for notice in notices:
         print(f"T3 Boat: {notice}.", file=sys.stderr)
 

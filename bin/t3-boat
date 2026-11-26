@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import boat_profile
 import playbook
 import playbook_fetch
+import playbook_pin
 from boat_profile import PARENT, read_profile, read_state, write
 from model_picker import configure
 
@@ -294,8 +295,10 @@ def choose_playbook(profile, current):
           "briefs every worker itself. It applies to every project of this profile; nothing is added to your "
           "repositories.")
     print(f"Current playbook: {describe(current)}")
-    suggested = playbook_fetch.destination(Path.home() / "teams")
-    print(f"Suggested: agent-playbook, {playbook_fetch.URL} at commit {playbook_fetch.COMMIT[:12]}. Enter "
+    teams = Path.home() / "teams"
+    pin = playbook_pin.PIN
+    suggested = playbook_fetch.destination(teams)
+    print(f"Suggested: agent-playbook, {playbook_fetch.URL} at commit {pin.commit[:12]}. Enter "
           f"'agent-playbook' to download that commit into {suggested} and attach it; it is read as data and nothing "
           "from it runs here. Nothing is downloaded unless you enter it.")
     choices = "Enter to keep it, 'none' to detach" if current else "Enter for none"
@@ -306,6 +309,7 @@ def choose_playbook(profile, current):
     print(choices + ".")
     while True:
         reply = input("Playbook: ").strip()
+        package = None
         if not reply:
             if current is None:
                 return None, None
@@ -315,22 +319,32 @@ def choose_playbook(profile, current):
         elif reply.lower() == "bundled" and bundled:
             path = str(bundled.root)
         elif reply.lower() == "agent-playbook":
-            print(f"Downloading {playbook_fetch.URL} at commit {playbook_fetch.COMMIT} ...", flush=True)
+            other = "Enter to keep the current playbook, 'none' to detach it" if current else "Enter for none"
+            if suggested.exists() or suggested.is_symlink():
+                print(f"Checking {suggested} against the pinned commit {pin.commit} (offline) ...", flush=True)
+            else:
+                print(f"Downloading {playbook_fetch.URL} at commit {pin.commit} ...", flush=True)
             try:
-                path = str(playbook_fetch.fetch(Path.home() / "teams"))
+                package = playbook_fetch.load(teams)  # Checked against the pin in the read that is applied.
+            except playbook_fetch.Mismatch as error:
+                print(f"agent-playbook was not attached: {error}. Nothing was changed, and the folder was left as "
+                      f"it is. Enter its path to attach it as your own package (shown as unverified), "
+                      f"move it away and enter 'agent-playbook' to download the pinned commit again, {other}, or "
+                      "the path of another package directory in the container.")
+                continue
             except playbook_fetch.FetchError as error:
-                other = "Enter to keep the current playbook, 'none' to detach it" if current else "Enter for none"
                 print(f"agent-playbook could not be downloaded: {error}. Nothing was changed. Check this server's "
                       f"network and enter 'agent-playbook' to retry, {other}, or the path of a package directory "
                       "in the container.")
                 continue
         else:
             path = reply
-        try:
-            package = playbook.load(path)
-        except playbook.PlaybookError as error:
-            print(f"{error}. Enter another path, or 'none'.")
-            continue
+        if package is None:
+            try:
+                package = playbook.load(path)
+            except playbook.PlaybookError as error:
+                print(f"{error}. Enter another path, or 'none'.")
+                continue
         print(f"Attaching {package.label()}: roles " + ", ".join(
             f"{role} ({spec['instances']})" for role, spec in package.roles.items()) + ".")
         same = current is not None and Path(current["path"]) == package.root

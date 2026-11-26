@@ -7,6 +7,7 @@ role's guide in its provider's instruction file on its VM (see boat-worker).
 import json
 import os
 import re
+import stat
 from pathlib import Path
 
 from playbook import read_regular, skill_name
@@ -60,10 +61,24 @@ def obstacle(base, path):
     return None
 
 
-def physical(path):
-    """The file a path reaches once every link is resolved: one key for a file seen through aliased folders, such
-    as `~/.claude/skills` linked to `~/.codex/skills`, so it is planned once and never removed while wanted."""
-    return Path(os.path.realpath(path))
+def entry(path):
+    """The directory entry a path names, as (device, inode of its folder, name): one key for a file seen through
+    aliased folders, whether a link (`~/.claude/skills` linked to `~/.codex/skills`) or two bind mounts of one host
+    folder, which `realpath` tells apart. It keys the entry, not the file it holds: two hard links in different
+    folders, or a link and its target, are separate entries, and removing one never touches the other. A path whose
+    folders do not exist yet is keyed by its nearest existing folder and the names below it, so two paths that
+    will be created in one folder are one entry before either exists."""
+    path = Path(os.path.abspath(path))
+    names = [path.name]
+    for folder in path.parents:
+        try:
+            found = os.stat(folder)
+        except OSError:
+            found = None
+        if found is not None and stat.S_ISDIR(found.st_mode):
+            return found.st_dev, found.st_ino, tuple(names)
+        names.insert(0, folder.name)
+    return None, None, (str(path),)
 
 
 def plan(bases, enabled, package, lead_role=None):
@@ -73,7 +88,8 @@ def plan(bases, enabled, package, lead_role=None):
     a package nothing is wanted, so every guide t3-boat generated earlier is removed. Kept files are regular files
     the owner made at a guide path. Blocked guides are (guide path, obstacle) pairs where something else occupies
     the path; they are neither written nor named to the team lead. Wanted and stale guides are compared by the file
-    they reach: a guide an enabled provider wants is never removed through a disabled provider's aliased folder.
+    directory entry they name (see entry): a guide an enabled provider wants is never removed through a disabled
+    provider's aliased folder.
     """
     writes, removals, kept, blocked = {}, [], [], []
     wanted = set()
@@ -82,7 +98,7 @@ def plan(bases, enabled, package, lead_role=None):
             continue
         for role in package.roles:
             path = skill_path(base, package, role)
-            wanted.add(physical(path))
+            wanted.add(entry(path))
             if (found := obstacle(base, path)) is not None:
                 blocked.append((path, found))
             elif path.is_file() and not generated(path):
@@ -91,8 +107,8 @@ def plan(bases, enabled, package, lead_role=None):
                 writes[path] = skill_text(package, role, lead_role)
     for base in bases.values():
         for path in sorted((Path(base) / "skills").glob("playbook-*/SKILL.md")):
-            if (key := physical(path)) not in wanted and generated(path):
-                wanted.add(key)  # Listed once, also when a second provider's folder reaches the same file.
+            if (key := entry(path)) not in wanted and generated(path):
+                wanted.add(key)  # Listed once, also when a second provider's folder reaches the same entry.
                 removals.append(path)
     return writes, removals, kept, blocked
 

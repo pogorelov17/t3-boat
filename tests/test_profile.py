@@ -524,48 +524,113 @@ class ProfileTests(unittest.TestCase):
             self.assertIn(f"guide at {lead} before your first response", note)
             self.assertTrue(lead.is_file())
 
+    def alias_cycle(self, profile, real, alias):
+        """Attach, refresh unchanged, refresh an edited package, switch packages and detach, while `alias(home)`
+        makes one provider's skill folder reach the other's; every step must leave the profile applied."""
+        other = write_package(self.home / "teams/other", name="other-crew", roles={"solo": 1}, sets={})
+        skills = alias(self.home)
+        package = write_package(self.home / "teams/harbor")
+        loaded = playbook.load(str(package))
+        owner = skills / "team-notes/SKILL.md"
+        owner.parent.mkdir()
+        owner.write_text("my notes\n")
+        for attachment, current in ((None, None), ({"path": str(package), "model_set": None, "lead_role": "rigger"},
+                                                   loaded)):
+            save(self.home, profile, attachment)
+            for _ in range(2):  # Apply, then refresh unchanged: the second start once removed everything.
+                result = self.serve(profile)
+                self.assertNotIn("not installed", result.stderr)
+                self.assert_applied_through_aliases(profile, current, "rigger")
+        # Refresh after the package changed: each guide is rewritten in place, not removed.
+        (package / "crew/rigger/how/steps.md").write_text("EDITED-STEPS\n")
+        self.serve(profile)
+        self.assert_applied_through_aliases(profile, playbook.load(str(package)), "rigger")
+        self.assertIn("EDITED-STEPS", playbook_skills.skill_path(skills.parent, loaded, "rigger").read_text())
+        # Attaching another package removes the earlier package's guides as ordinary stale files.
+        save(self.home, profile, {"path": str(other), "model_set": None, "lead_role": "solo"})
+        self.serve(profile)
+        self.serve(profile)
+        self.assert_applied_through_aliases(profile, playbook.load(str(other)), "solo")
+        for guide in self.guides(skills.parent, loaded):
+            self.assertFalse(guide.parent.exists(), guide)
+        # Detaching leaves the Boat skill without a playbook for every enabled provider.
+        save(self.home, profile, None)
+        self.serve(profile)
+        self.serve(profile)
+        self.assert_applied_through_aliases(profile, None, None)
+        self.assertEqual(sorted(p.parent.name for p in skills.glob("*/SKILL.md")), ["t3-boat", "team-notes"])
+        self.assertEqual(owner.read_text(), "my notes\n")
+
     def test_aliased_skill_folders_keep_active_guides_in_both_directions(self):
         root = self.home
-        other = write_package(root / "teams/other", name="other-crew", roles={"solo": 1}, sets={})
+
+        def link(real, alias):
+            def make(home):
+                (home / BASES[real] / "skills").mkdir(parents=True)
+                (home / BASES[alias]).mkdir()
+                (home / BASES[alias] / "skills").symlink_to(home / BASES[real] / "skills", target_is_directory=True)
+                return home / BASES[real] / "skills"
+            return make
+
         for real, alias in (("codex", "claudeAgent"), ("claudeAgent", "codex")):
             for profile in ("codex-only", "claude-only", "codex+claude"):
                 with self.subTest(alias=f"{BASES[alias]}/skills -> {BASES[real]}/skills", profile=profile):
                     self.use_home(root / "volumes" / f"{real}-{profile}")
-                    (self.home / BASES[real] / "skills").mkdir(parents=True)
-                    (self.home / BASES[alias]).mkdir()
-                    (self.home / BASES[alias] / "skills").symlink_to(self.home / BASES[real] / "skills",
-                                                                     target_is_directory=True)
-                    package = write_package(self.home / "teams/harbor")
-                    loaded = playbook.load(str(package))
-                    owner = self.home / BASES[real] / "skills/team-notes/SKILL.md"
-                    owner.parent.mkdir()
-                    owner.write_text("my notes\n")
-                    attachment = {"path": str(package), "model_set": None, "lead_role": "rigger"}
-                    save(self.home, profile, attachment)
-                    for _ in range(2):  # Attach, then refresh unchanged.
-                        result = self.serve(profile)
-                        self.assertNotIn("not installed", result.stderr)
-                        self.assert_applied_through_aliases(profile, loaded, "rigger")
-                    # Refresh after the package changed: each guide is rewritten in place, not removed.
-                    (package / "crew/rigger/how/steps.md").write_text("EDITED-STEPS\n")
-                    self.serve(profile)
-                    self.assert_applied_through_aliases(profile, playbook.load(str(package)), "rigger")
-                    self.assertIn("EDITED-STEPS", playbook_skills.skill_path(
-                        self.home / BASES[real], loaded, "rigger").read_text())
-                    # Attaching another package removes the earlier package's guides as ordinary stale files.
-                    save(self.home, profile, {"path": str(other), "model_set": None, "lead_role": "solo"})
-                    self.serve(profile)
-                    self.assert_applied_through_aliases(profile, playbook.load(str(other)), "solo")
-                    for guide in self.guides(self.home / BASES[real], loaded):
-                        self.assertFalse(guide.parent.exists(), guide)
-                    # Detaching leaves the Boat skill without a playbook for every enabled provider.
-                    save(self.home, profile, None)
-                    self.serve(profile)
-                    self.assert_applied_through_aliases(profile, None, None)
-                    self.assertEqual(sorted(p.parent.name for p in (self.home / BASES[real] / "skills").glob("*/SKILL.md")),
-                                     ["t3-boat", "team-notes"])
-                    self.assertEqual(owner.read_text(), "my notes\n")
+                    self.alias_cycle(profile, real, link(real, alias))
                     self.assertTrue((self.home / BASES[alias] / "skills").is_symlink())
+
+    def test_bind_mounted_skill_folders_keep_active_guides(self):
+        """Docker bind mounts of one host folder at both providers' skill paths: separate realpaths, one folder.
+        Mounting needs a private user and mount namespace, so the cases run in one (unshare -Urm)."""
+        if os.environ.get("T3_BOAT_BIND_MOUNTS") == "1":
+            self.skipTest("already inside the mount namespace")
+        probe = subprocess.run(["unshare", "-Urm", "true"], capture_output=True) if shutil.which("unshare") else None
+        if probe is None or probe.returncode:
+            self.skipTest("unprivileged mount namespaces are unavailable here; tests/smoke-image.sh runs the same "
+                          "cases with real Docker bind mounts")
+        result = subprocess.run(["unshare", "-Urm", sys.executable, "-m", "unittest", "-v",
+                                 "test_profile.BindMountTests"], cwd=ROOT / "tests", capture_output=True, text=True,
+                                env={**self.env, "T3_BOAT_BIND_MOUNTS": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr[-4000:])
+        self.assertIn("OK", result.stderr)
+        self.assertNotIn("skipped", result.stderr)
+
+    def test_hard_linked_guides_are_separate_entries(self):
+        """A hard link is one file under two names: each provider's entry is planned on its own, so removing the
+        disabled provider's name keeps the enabled provider's guide, and both are kept while both are enabled."""
+        attachment = {"path": str(self.package), "model_set": None, "lead_role": "rigger"}
+        loaded = playbook.load(str(self.package))
+        save(self.home, "codex-only", attachment)
+        self.serve("codex-only")
+        codex = self.home / ".codex"
+        claude = self.home / ".claude"
+        for path in [boat_profile.boat_skill_path(codex), *self.guides(codex, loaded)]:
+            twin = claude / path.relative_to(codex)
+            twin.parent.mkdir(parents=True, exist_ok=True)
+            os.link(path, twin)
+        self.serve("codex-only")
+        self.assert_applied_through_aliases("codex-only", loaded, "rigger")
+        self.assertFalse((claude / "skills").exists() and any((claude / "skills").iterdir()))
+        save(self.home, "codex+claude", attachment)
+        self.serve("codex+claude")
+        for path in [boat_profile.boat_skill_path(codex), *self.guides(codex, loaded)]:
+            (claude / path.relative_to(codex)).unlink()
+            os.link(path, claude / path.relative_to(codex))
+        self.serve("codex+claude")
+        self.assert_applied_through_aliases("codex+claude", loaded, "rigger")
+        self.assertIn(str(claude / "skills/t3-boat/SKILL.md"), (claude / "CLAUDE.md").read_text())
+
+    def test_entries_are_keyed_by_folder_and_name(self):
+        a, b = self.home / "a", self.home / "b"
+        a.mkdir()
+        b.symlink_to(a, target_is_directory=True)
+        self.assertEqual(playbook_skills.entry(a / "x/y/SKILL.md"), playbook_skills.entry(b / "x/y/SKILL.md"))
+        self.assertNotEqual(playbook_skills.entry(a / "x/SKILL.md"), playbook_skills.entry(a / "y/SKILL.md"))
+        (a / "file").write_text("x")
+        (a / "link").symlink_to(a / "file")
+        os.link(a / "file", a / "hard")
+        keys = {playbook_skills.entry(a / name) for name in ("file", "link", "hard")}
+        self.assertEqual(len(keys), 3)
 
     def test_aliased_configuration_folders_keep_the_boat_skill_of_the_enabled_provider(self):
         # CLAUDE_CONFIG_DIR naming the Codex home: both providers' skills are one folder.
@@ -657,6 +722,56 @@ class ProfileTests(unittest.TestCase):
         override.write_text("mine\n")
         result = self.serve("codex-only", check=False)
         self.assertIn("masks the required global profile", result.stderr)
+
+
+@unittest.skipUnless(os.environ.get("T3_BOAT_BIND_MOUNTS") == "1", "runs inside unshare -Urm, from "
+                     "test_bind_mounted_skill_folders_keep_active_guides")
+class BindMountTests(unittest.TestCase):
+    """Each case mounts one host folder at both providers' skill folders, or at both configuration folders."""
+    setUp, serve, use_home, guides = ProfileTests.setUp, ProfileTests.serve, ProfileTests.use_home, ProfileTests.guides
+    alias_cycle, assert_applied_through_aliases = ProfileTests.alias_cycle, ProfileTests.assert_applied_through_aliases
+
+    def mount(self, source, target):
+        subprocess.run(["mount", "--bind", str(source), str(target)], check=True)
+        self.addCleanup(subprocess.run, ["umount", "-l", str(target)], check=True)
+
+    def test_bind_mounts_in_both_directions(self):
+        root = self.home
+
+        def bind(level, real):
+            def make(home):
+                host = home / "host"
+                host.mkdir()
+                for base in BASES.values():
+                    folder = home / base / ("skills" if level == "skills" else "")
+                    folder.mkdir(parents=True, exist_ok=True)
+                    self.mount(host, folder)
+                skills = home / BASES[real] / "skills"
+                skills.mkdir(exist_ok=True)  # At the configuration level the skills folder is missing until now.
+                self.assertNotEqual(os.path.realpath(home / ".codex/skills"), os.path.realpath(home / ".claude/skills"))
+                return skills
+            return make
+
+        for level in ("skills", "configuration"):
+            for real in BASES:
+                for profile in ("codex-only", "claude-only", "codex+claude"):
+                    with self.subTest(level=level, owner_skill_under=BASES[real], profile=profile):
+                        self.use_home(root / "volumes" / f"{level}-{real}-{profile}")
+                        self.alias_cycle(profile, real, bind(level, real))
+
+    def test_missing_destination_through_bind_mounts(self):
+        host = self.home / "host"
+        host.mkdir()
+        for base in BASES.values():
+            (self.home / base).mkdir()
+            self.mount(host, self.home / base)
+        # Neither skills folder exists yet: the entries are keyed by the mounted folder and the names below it.
+        self.assertEqual(playbook_skills.entry(self.home / ".codex/skills/t3-boat/SKILL.md"),
+                         playbook_skills.entry(self.home / ".claude/skills/t3-boat/SKILL.md"))
+        save(self.home, "claude-only", {"path": str(self.package), "model_set": None, "lead_role": "rigger"})
+        self.serve("claude-only")
+        self.serve("claude-only")
+        self.assert_applied_through_aliases("claude-only", playbook.load(str(self.package)), "rigger")
 
 
 if __name__ == "__main__":

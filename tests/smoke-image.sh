@@ -18,7 +18,22 @@ cleanup() {
   if [[ -n "$container" ]]; then docker rm -f "$container" >/dev/null; fi
   if [[ -n "$volume" ]]; then docker volume rm "$volume" >/dev/null; fi
 }
-trap 'cleanup; rm -rf "$host_dir"' EXIT
+remove_host_dir() {  # Files the container user wrote into a bind mount may belong to another uid on the host.
+  docker run --rm -u 0 --network none --entrypoint sh -v "$host_dir:/host" "$image" -c 'rm -rf /host/* /host/.[!.]*' \
+    >/dev/null 2>&1 || true
+  rm -rf "$host_dir"
+}
+trap 'cleanup; remove_host_dir' EXIT
+# The suggested playbook's real pinned release, for the generic image: downloaded on this host by the same code the
+# image runs, because the containers here have no network. The bundled image already holds it.
+lib=$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)
+pinned_commit=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import playbook_pin; print(playbook_pin.COMMIT)' "$lib")
+release_name=agent-playbook-${pinned_commit:0:12}
+if [[ $kind == generic ]]; then
+  python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import playbook_fetch; playbook_fetch.load(sys.argv[2])' \
+    "$lib" "$host_dir"
+  [[ -f $host_dir/$release_name/.commit ]]
+fi
 
 # The image contains a playbook exactly when it was built to bundle one.
 if docker run --rm --network none --entrypoint test "$image" -e /opt/t3-boat/playbook; then
@@ -84,8 +99,15 @@ copy_package() {  # NAME
   [[ -z "$foreign" ]] || { echo "not owned by the container user after the README's chown: $foreign" >&2; exit 1; }
 }
 
+restart() {
+  docker stop "$container" >/dev/null
+  docker rm "$container" >/dev/null
+  container=
+  start
+}
+extra=()  # More `docker run` options, such as bind mounts.
 start() {
-  container=$(docker run -d --network none -v "$volume:/data" -e "T3_BOAT_PROFILE=$profile" "$image")
+  container=$(docker run -d --network none -v "$volume:/data" "${extra[@]}" -e "T3_BOAT_PROFILE=$profile" "$image")
   for _ in {1..60}; do
     if docker exec "$container" curl -fsS --max-time 2 http://127.0.0.1:3773/ -o /dev/null 2>/dev/null; then
       return
@@ -97,45 +119,10 @@ start() {
   return 1
 }
 
-for profile in codex-only claude-only codex+claude; do
-  volume=$(docker volume create)
-  start
-  docker exec "$container" sh -ec 'test "$(id -u)" != 0 && test -w /data && test "$HOME" = /data'
-  # Every installed t3-boat file is readable by the container user, whatever the build checkout's umask.
-  unreadable=$(docker exec "$container" find /opt/t3-boat ! -perm -a+r -print -quit)
-  [[ -z "$unreadable" ]] || { echo "Unreadable in the image: $unreadable" >&2; exit 1; }
-  # A fresh install has no subscriptions or Boat project. Offline status must report incomplete (exit 1 and
-  # the setup hint), even though the actual T3 backend is already serving; a docker failure is not that.
-  incomplete_status "$container"
-  if [[ "$profile" == codex-only ]]; then
-    # The real server must return its provider snapshot even before login.
-    docker exec "$container" python3 -c 'import sys; sys.path.insert(0, "/opt/t3-boat/lib"); from model_catalog import provider_snapshot; assert any(p["instanceId"] == "codex" for p in provider_snapshot("codex")["providers"])'
-  fi
-  case "$profile" in
-    # The suggested playbook cannot be downloaded without a network: setup says so, changes nothing and asks
-    # again; Enter then attaches none. Choose the lead model by number (the provider is the only one), then accept.
-    codex-only) answers=$'agent-playbook\n\n2\n3\n\n\n\n' ;;
-    # Every choice is explicit: the role for the team lead and the model set, then the suggested lead model.
-    claude-only)
-      if [[ $kind == bundled ]]; then
-        answers=$'bundled\nlead\nclaude-only\n\n\n\n'
-      else
-        (umask 077; t3_package)
-        copy_package t3
-        answers=$'/data/teams/t3\nboat\nsolo\n\n\n\n'
-      fi ;;
-    # A team that shares no role name, count or model set name with agent-playbook, copied in from the host
-    # with the README's exact command into the directory every container start provides.
-    codex+claude)
-      (umask 077; crew_package)
-      copy_package crew
-      echo " " >> "$host_dir/crew/team.json"
-      copy_package crew
-      docker exec "$container" cat /data/teams/crew/team.json | cmp - "$host_dir/crew/team.json"
-      answers=$'/data/teams/crew\nharbor-master\nduo\n\n\n\n' ;;
-  esac
-  # Exercise real setup, worker scripts and status against offline service doubles.
-  docker exec -i -e "ANSWERS=$answers" "$container" sh -eu <<'SH'
+# Run real setup with ANSWERS on stdin, against offline service doubles for Boat, the providers and their model
+# lists; its output is kept in /data/setup-output.
+run_setup() {  # ANSWERS
+  docker exec -i -e "ANSWERS=$1" "$container" sh -eu <<'SH'
 auth_tools=$(mktemp -d)
 cat > "$auth_tools/boat" <<'MOCK'
 #!/bin/sh
@@ -198,6 +185,47 @@ printf '%s' "$ANSWERS" | t3-boat setup > "$HOME/setup-output"
 test ! -e "$HOME/check-vm"
 t3-boat status | grep -F 'Setup verified'
 SH
+}
+
+for profile in codex-only claude-only codex+claude; do
+  volume=$(docker volume create)
+  start
+  docker exec "$container" sh -ec 'test "$(id -u)" != 0 && test -w /data && test "$HOME" = /data'
+  # Every installed t3-boat file is readable by the container user, whatever the build checkout's umask.
+  unreadable=$(docker exec "$container" find /opt/t3-boat ! -perm -a+r -print -quit)
+  [[ -z "$unreadable" ]] || { echo "Unreadable in the image: $unreadable" >&2; exit 1; }
+  # A fresh install has no subscriptions or Boat project. Offline status must report incomplete (exit 1 and
+  # the setup hint), even though the actual T3 backend is already serving; a docker failure is not that.
+  incomplete_status "$container"
+  if [[ "$profile" == codex-only ]]; then
+    # The real server must return its provider snapshot even before login.
+    docker exec "$container" python3 -c 'import sys; sys.path.insert(0, "/opt/t3-boat/lib"); from model_catalog import provider_snapshot; assert any(p["instanceId"] == "codex" for p in provider_snapshot("codex")["providers"])'
+  fi
+  case "$profile" in
+    # The suggested playbook cannot be downloaded without a network: setup says so, changes nothing and asks
+    # again; Enter then attaches none. Choose the lead model by number (the provider is the only one), then accept.
+    codex-only) answers=$'agent-playbook\n\n2\n3\n\n\n\n' ;;
+    # Every choice is explicit: the role for the team lead and the model set, then the suggested lead model.
+    claude-only)
+      if [[ $kind == bundled ]]; then
+        answers=$'bundled\nlead\nclaude-only\n\n\n\n'
+      else
+        (umask 077; t3_package)
+        copy_package t3
+        answers=$'/data/teams/t3\nboat\nsolo\n\n\n\n'
+      fi ;;
+    # A team that shares no role name, count or model set name with agent-playbook, copied in from the host
+    # with the README's exact command into the directory every container start provides.
+    codex+claude)
+      (umask 077; crew_package)
+      copy_package crew
+      echo " " >> "$host_dir/crew/team.json"
+      copy_package crew
+      docker exec "$container" cat /data/teams/crew/team.json | cmp - "$host_dir/crew/team.json"
+      answers=$'/data/teams/crew\nharbor-master\nduo\n\n\n\n' ;;
+  esac
+  # Exercise real setup, worker scripts and status against offline service doubles.
+  run_setup "$answers"
   role_file="/data/profiles/$profile.json"
   lead_dir=$(docker exec "$container" sh -c 'test "$(jq -r .lead.provider "$1")" = codex && echo .codex || echo .claude' _ "$role_file")
   skill="/data/$lead_dir/skills/t3-boat/SKILL.md"
@@ -239,16 +267,38 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_CO
 git -C "$repository" init --quiet && git -C "$repository" add -A && git -C "$repository" commit --quiet -m package
 commit=$(git -C "$repository" rev-parse HEAD)
 teams=$(mktemp -d)
-python3 - "$teams" "file://$repository" "$commit" <<'PYTHON'
-import os, sys
+python3 - "$teams" "$repository" "$commit" <<'PYTHON'
+import hashlib, os, subprocess, sys
 sys.path.insert(0, "/opt/t3-boat/lib")
-import playbook, playbook_fetch
-target = playbook_fetch.fetch(sys.argv[1], repository=sys.argv[2], commit=sys.argv[3])
-package = playbook.load(str(target))
-assert package.commit == sys.argv[3] and list(package.roles) == ["deckhand"], package.label()
+import playbook, playbook_fetch, playbook_pin
+teams, repository, commit = sys.argv[1:]
+def git(*args):
+    return subprocess.run(["git", "-C", repository, *args], check=True, capture_output=True).stdout
+files = {}
+for entry in filter(None, git("ls-tree", "-r", "-z", commit).split(b"\0")):
+    meta, _, name = entry.partition(b"\t")
+    mode, _, blob = meta.decode().split()
+    files[name.decode()] = (mode, blob, hashlib.sha256(git("cat-file", "blob", blob)).hexdigest())
+pin = playbook_pin.Pin(commit, git("rev-parse", commit + "^{tree}").decode().strip(), files)
+package = playbook_fetch.load(teams, repository="file://" + repository, pin=pin)
+target = package.root
+assert package.pin == commit and list(package.roles) == ["deckhand"], package.label()
 assert "INSTRUCTIONS-FOR-deckhand" in package.bundle("deckhand")
 assert not os.access(target / "check.sh", os.X_OK)
-assert sorted(os.listdir(sys.argv[1])) == [target.name]
+assert sorted(os.listdir(teams)) == [target.name]
+# Reuse runs no git; a changed file is then refused, named, and left as it is.
+def offline(*args, **kwargs):
+    raise AssertionError("git ran")
+playbook_fetch._git = offline
+assert playbook_fetch.load(teams, pin=pin).pin == commit
+(target / "guides/deckhand.md").write_text("EDITED\n")
+try:
+    playbook_fetch.load(teams, pin=pin)
+    raise AssertionError("a changed release was accepted")
+except playbook_fetch.Mismatch as error:
+    assert "guides/deckhand.md differs from the pinned commit" in str(error), error
+assert (target / "guides/deckhand.md").read_text() == "EDITED\n"
+assert f"unverified commit {commit[:12]}" in playbook.load(str(target), pin).label()
 PYTHON
 test ! -e /data/package-code-ran
 rm -rf "$repository" "$teams"
@@ -337,12 +387,6 @@ grep -Fq 'Your result for the lead states only what you observed' "$HOME/worker-
 grep -Fq '"enabled": true' "$HOME/worker-script"
 rm "$HOME/worker-script" "$HOME/worker-deleted"
 SH
-  restart() {
-    docker stop "$container" >/dev/null
-    docker rm "$container" >/dev/null
-    container=
-    start
-  }
   if [[ "$profile" == codex+claude ]]; then
     # Damage the package in turn: a file the container user cannot read, a role name holding the instruction
     # files' END marker, a FIFO in place of the manifest, then no manifest. Each time T3 still starts, with only a
@@ -436,4 +480,100 @@ SH
   cleanup
   container=
   volume=
+done
+
+# The real pinned release in a fresh codex-only volume, offline: setup checks every file against the pin and
+# attaches it without git. A changed copy is refused and left as it is; attached by its path it is labelled
+# unverified.
+profile=codex-only
+volume=$(docker volume create)
+start
+release=/data/teams/$release_name
+if [[ $kind == generic ]]; then
+  copy_package "$release_name"
+else
+  docker exec "$container" cp -R /opt/t3-boat/playbook "$release"
+fi
+run_setup $'agent-playbook\nlead\ncodex-only\n\n\n\n'
+setup_output=$(docker exec "$container" cat /data/setup-output)
+require 't3-boat setup' "$setup_output" "Checking $release against the pinned commit $pinned_commit (offline)"
+require 't3-boat setup' "$setup_output" "Attaching agent-playbook (version 2.0.0, commit ${pinned_commit:0:12}) at $release"
+[[ $setup_output != *Downloading* ]] || { echo "setup downloaded although the release was there" >&2; exit 1; }
+status=$(status_output "$container")
+require 't3-boat status' "$status" '[ok] Global profile codex-only applied'
+require 't3-boat status' "$status" "Playbook: agent-playbook (version 2.0.0, commit ${pinned_commit:0:12}) at $release, model set codex-only, team lead follows lead"
+docker exec "$container" sh -c 'printf "TAMPERED\n" >> "$1/roles/lead/ROLE.md"' _ "$release"
+listing='cd "$1" && find . -printf "%y %m %p %l\n" | sort && find . -type f -exec sha256sum {} + | sort'
+before=$(docker exec "$container" sh -c "$listing" _ "$release")
+refused=$(printf 'agent-playbook\n\n' | docker exec -i "$container" python3 -c \
+  'import runpy; print(runpy.run_path("/opt/t3-boat/bin/t3-boat")["choose_playbook"]("codex-only", None))')
+require 'choose_playbook' "$refused" "agent-playbook was not attached: $release does not hold the pinned commit ${pinned_commit:0:12}: roles/lead/ROLE.md differs from the pinned commit"
+require 'choose_playbook' "$refused" '(None, None)'
+[[ $(docker exec "$container" sh -c "$listing" _ "$release") == "$before" ]] ||
+  { echo "the changed release was modified" >&2; exit 1; }
+restart
+status=$(status_output "$container")
+require 't3-boat status' "$status" '[ok] Global profile codex-only applied'
+require 't3-boat status' "$status" "Playbook: agent-playbook (version 2.0.0, unverified commit ${pinned_commit:0:12}) at $release"
+docker exec "$container" grep -Fq "unverified commit ${pinned_commit:0:12}" /data/.codex/skills/t3-boat/SKILL.md
+cleanup
+container=
+volume=
+
+# One host folder bind-mounted at both providers' skill folders, as `docker run -v DIR:/data/.codex/skills -v
+# DIR:/data/.claude/skills` does: two paths with different realpaths that are one folder. For each profile, and so
+# with either provider's path disabled, attach a package, refresh it unchanged and edited, then detach it; every
+# start must leave the profile applied with its Boat skill and guides in place and the owner's own skill kept.
+shared=$host_dir/shared-skills
+mkdir "$shared"
+docker run --rm -u 0 --network none --entrypoint chown -v "$shared:/skills" "$image" node:node /skills
+mounts=(--mount "type=bind,src=$shared,dst=/data/.codex/skills" --mount "type=bind,src=$shared,dst=/data/.claude/skills")
+bind_check() {  # PROFILE MODE: playbook or generic
+  local status base guides
+  status=$(status_output "$container")
+  require 't3-boat status' "$status" "[ok] Global profile $1 applied"
+  docker exec "$container" test -f "/data/profiles/$1.applied.json"
+  docker exec "$container" sh -ec '[ "$(stat -c %d:%i /data/.codex/skills)" = "$(stat -c %d:%i /data/.claude/skills)" ]
+    [ "$(realpath /data/.codex/skills)" != "$(realpath /data/.claude/skills)" ]'
+  for base in .codex .claude; do
+    docker exec "$container" grep -Fq '# Boat project workflow' "/data/$base/skills/t3-boat/SKILL.md"
+    guides=$(docker exec "$container" sh -c 'ls -d "$1"/playbook-harbor-crew-* 2>/dev/null | wc -l' _ "/data/$base/skills")
+    if [[ $2 == playbook ]]; then
+      [[ $guides == 3 ]] || { echo "$1: expected 3 guides under /data/$base/skills, found $guides" >&2; exit 1; }
+      docker exec "$container" sh -c 'grep -Fq INSTRUCTIONS-FOR-rigger "$1"/playbook-harbor-crew-rigger-*/SKILL.md' _ "/data/$base/skills"
+    else
+      [[ $guides == 0 ]] || { echo "$1: $guides guides left under /data/$base/skills after detaching" >&2; exit 1; }
+    fi
+  done
+  docker exec "$container" grep -Fq 'my notes' /data/.claude/skills/team-notes/SKILL.md
+}
+for profile in codex-only claude-only codex+claude; do
+  docker run --rm -u 0 --network none --entrypoint sh -v "$shared:/skills" "$image" -c 'rm -rf /skills/* && mkdir /skills/team-notes && printf "%s\n" --- "name: team-notes" "description: mine" --- "" "my notes" > /skills/team-notes/SKILL.md && chown -R node:node /skills'
+  volume=$(docker volume create)
+  # The mount points are made in the volume first, by the container user, as an owner's earlier start would.
+  docker run --rm --network none --entrypoint mkdir -v "$volume:/data" "$image" -p /data/.codex/skills /data/.claude/skills
+  extra=("${mounts[@]}")
+  start
+  (umask 077; crew_package)
+  copy_package crew
+  case $profile in
+    claude-only) lead='{"provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}' ;;
+    *) lead='{"provider": "codex", "model": "gpt-6.2-astra", "effort": "high"}' ;;
+  esac
+  attached='{"path": "/data/teams/crew", "model_set": null, "lead_role": "rigger"}'
+  docker exec "$container" sh -c 'mkdir -p /data/profiles && printf "%s\n" "$1" > "/data/profiles/$2.json"' _ \
+    "{\"lead\": $lead, \"playbook\": $attached}" "$profile"
+  for step in attach refresh; do restart; bind_check "$profile" playbook; done
+  docker exec "$container" sh -c 'printf "EDITED-RIGGER\n" >> /data/teams/crew/people/rigger/ROLE.md'
+  restart
+  bind_check "$profile" playbook
+  docker exec "$container" sh -c 'grep -lq EDITED-RIGGER /data/.claude/skills/playbook-harbor-crew-rigger-*/SKILL.md'
+  docker exec "$container" sh -c 'printf "%s\n" "$1" > "/data/profiles/$2.json"' _ "{\"lead\": $lead, \"playbook\": null}" "$profile"
+  for step in detach refresh; do restart; bind_check "$profile" generic; done
+  [[ $(docker exec "$container" ls /data/.codex/skills | sort | tr '\n' ' ') == "t3-boat team-notes " ]] ||
+    { echo "unexpected entries in the shared skills folder" >&2; exit 1; }
+  cleanup
+  container=
+  volume=
+  extra=()
 done

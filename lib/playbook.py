@@ -8,6 +8,10 @@ rules and every instruction belong to the package; nothing here knows a role by 
 Loading reads and checks every file the manifest names, in full, before anything is generated from it, and keeps
 the contents in memory: every guide, skill and worker instruction made from one loaded package comes from the
 same read, even while the owner edits the directory.
+
+A package names a commit only when its whole folder holds the suggested playbook's pinned release
+(playbook_pin.check) and every file this read used has the pinned content. Any other `.commit` file is shown as
+an unverified claim.
 """
 import hashlib
 import json
@@ -15,6 +19,8 @@ import os
 import re
 import stat
 from pathlib import Path
+
+import playbook_pin
 
 ROOT = Path(__file__).resolve().parents[1]
 # A copy of agent-playbook that an image built with BUNDLE_PLAYBOOK=1 contains (scripts/fetch-playbook); setup
@@ -95,7 +101,7 @@ def _text_field(entry, key):
 class Package:
     """One validated package directory, read in full. Every path a manifest names must stay inside it."""
 
-    def __init__(self, path):
+    def __init__(self, path, pin=None):
         if not isinstance(path, (str, Path)) or not Path(path).is_absolute():
             raise PlaybookError(f"{path}: enter an absolute directory path")
         self.root = Path(path)
@@ -117,7 +123,19 @@ class Package:
         else:
             raise PlaybookError(f"{self.manifest_path}: the package kept changing while it was read; "
                                 "finish editing it and try again")
+        used = {path.relative_to(self.base).as_posix(): hashlib.sha256(data).hexdigest()
+                for path, data in self._read.items()}
         del self._read, self._paths
+        # The pinned commit, only when this folder and the bytes read here are that release; otherwise the
+        # differences from it, when the folder's `.commit` claims it.
+        self.pin, self.differences = None, []
+        pin = pin or playbook_pin.PIN
+        if self.commit == pin.commit:
+            differences, digests = playbook_pin.check(self.base, pin)
+            if not differences and all(digests.get(rel) == digest for rel, digest in used.items()):
+                self.pin = pin.commit
+            else:
+                self.differences = differences or ["it changed while it was read"]
 
     # Reading. Every file is read once per attempt, then read again to confirm nothing changed in between.
 
@@ -273,9 +291,11 @@ class Package:
     # The loaded package, from memory only.
 
     def label(self, where=True):
-        """How setup, status and the skill name this package; `where` adds its directory on this server."""
-        detail = ", ".join(part for part in (self.version and "version " + self.version,
-                                              self.commit and "commit " + self.commit[:12]) if part)
+        """How setup, status and the skill name this package; `where` adds its directory on this server. A commit
+        is named as such only when it was verified against the pin; any other `.commit` is marked unverified."""
+        commit = ("commit " + self.pin[:12] if self.pin else
+                  self.commit and "unverified commit " + self.commit[:12])
+        detail = ", ".join(part for part in (self.version and "version " + self.version, commit) if part)
         return f"{self.name}" + (f" ({detail})" if detail else "") + (f" at {self.root}" if where else "")
 
     def bundle(self, role):
@@ -306,5 +326,6 @@ class Package:
         return entries[0] if entries else None
 
 
-def load(path):
-    return Package(path)
+def load(path, pin=None):
+    """Read a package; `pin` is the release its `.commit` is checked against (by default playbook_pin.PIN)."""
+    return Package(path, pin)

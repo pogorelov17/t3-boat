@@ -17,10 +17,25 @@ LEGACY_WORDS = re.compile(r"(?i)(migrat|legacy|downgrad|earlier (release|image|i
                           r"setup-pending|profiles/workflow|playbook-skills|playbook\.md|upgrad)")
 
 
+def without_pin_table(path):
+    """A shipped file's text, without the pinned release's file table: content addresses of the suggested
+    playbook's files, which name them only so a changed or missing file can be reported. The table must hold
+    nothing but path and hash rows."""
+    text = path.read_text()
+    if path.name != "playbook_pin.py":
+        return text
+    start = text.index("FILES = {")
+    end = text.index("\n}\n", start) + 3
+    rows = text[start:end].splitlines()[1:-1]
+    row = re.compile(r'    "[A-Za-z0-9._/+-]+": \("100(644|755)", "[0-9a-f]{40}", "[0-9a-f]{64}"\),')
+    assert rows and all(row.fullmatch(line) for line in rows), "the pin table holds more than path and hash rows"
+    return text[:start] + text[end:]
+
+
 class AuditTests(unittest.TestCase):
     def test_shipped_files_name_no_package_role_family_or_review_rule(self):
         for path in SHIPPED:
-            text = path.read_text()
+            text = without_pin_table(path)
             with self.subTest(path=path.relative_to(ROOT)):
                 self.assertEqual([m[0] for m in PACKAGE_WORDS.finditer(text)], [])
 
