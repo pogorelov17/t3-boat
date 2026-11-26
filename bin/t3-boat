@@ -214,6 +214,14 @@ def describe(attachment):
             + (f", team lead follows {attachment['lead_role']}" if attachment["lead_role"] else ", no role for the team lead"))
 
 
+def menu_choice(reply, names):
+    """Displayed numbers select by position, including when a package uses numeric names."""
+    for position, name in enumerate(names, start=1):
+        if reply == str(position):
+            return name
+    return reply if reply in names else None
+
+
 def choose_lead_role(package, current):
     """Ask which of the package's roles the T3 team lead follows, if any. Only an earlier choice is a default:
     no role name means anything to T3 Boat."""
@@ -227,7 +235,7 @@ def choose_lead_role(package, current):
             return default
         if reply.lower() == "none":
             return None
-        chosen = next((role for n, role in enumerate(roles, start=1) if reply in (role, str(n))), None)
+        chosen = menu_choice(reply, roles)
         if chosen:
             return chosen
         print("Select a listed role by number or name, or 'none'.")
@@ -255,8 +263,7 @@ def choose_model_set(profile, package, current):
                       + (f" [{default}]: " if default else ": ")).strip()
         if reply.lower() == "none":
             return None
-        chosen = default if not reply else next(
-            (name for number, name in enumerate(fitting, start=1) if reply in (name, str(number))), None)
+        chosen = default if not reply else menu_choice(reply, fitting)
         if chosen:
             return chosen
         print("Select a listed model set by number or name, or 'none'.")

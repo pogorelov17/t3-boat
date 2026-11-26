@@ -193,7 +193,7 @@ When setup asks for a playbook, enter:
 - `bundled`, only in an image [built with a bundled playbook](#build-a-customized-image), for its copy of agent-playbook. The default image contains no playbook.
 
 ```sh
-docker cp ./my-team t3-boat:/data/teams/my-team
+docker cp ./my-team/. t3-boat:/data/teams/my-team
 docker exec -u 0 t3-boat chown -R node:node /data/teams/my-team
 ```
 

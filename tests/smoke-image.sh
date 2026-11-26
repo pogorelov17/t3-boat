@@ -78,7 +78,7 @@ JSON
 # docker cp keeps the host user's numeric owner and modes, so only the README's chown makes it readable when that
 # user is not the container's (as on CI runners).
 copy_package() {  # NAME
-  docker cp "$host_dir/$1" "$container:/data/teams/$1"
+  docker cp "$host_dir/$1/." "$container:/data/teams/$1"
   docker exec -u 0 "$container" chown -R node:node "/data/teams/$1"
   foreign=$(docker exec "$container" find "/data/teams/$1" ! -user node -print -quit)
   [[ -z "$foreign" ]] || { echo "not owned by the container user after the README's chown: $foreign" >&2; exit 1; }
@@ -128,6 +128,9 @@ for profile in codex-only claude-only codex+claude; do
     codex+claude)
       (umask 077; crew_package)
       copy_package crew
+      echo " " >> "$host_dir/crew/team.json"
+      copy_package crew
+      docker exec "$container" cat /data/teams/crew/team.json | cmp - "$host_dir/crew/team.json"
       answers=$'/data/teams/crew\nharbor-master\nduo\n\n\n\n' ;;
   esac
   # Exercise real setup, worker scripts and status against offline service doubles.

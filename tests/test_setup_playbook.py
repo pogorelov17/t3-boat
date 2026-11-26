@@ -74,6 +74,16 @@ class ChoosePlaybookTests(unittest.TestCase):
         self.assertIn("Model sets that need a provider claude-only does not enable: codex-only", output)
         self.assertIn("roles lead (1), builder (2)", output)
 
+    def test_numbered_options_reach_roles_and_sets_with_numeric_and_reserved_names(self):
+        assignment = {"2": {"provider": "codex", "family": "test", "effort": "high"}}
+        path = write_package(self.home / "teams/numbers", roles={"2": 1, "none": 1},
+                             sets={"2": assignment, "none": assignment})
+        for reply, expected in (("1", "2"), ("2", "none"), ("none", None)):
+            with self.subTest(reply=reply):
+                result, _ = self.choose("codex-only", None, str(path), reply, reply)
+                self.assertEqual(result["lead_role"], expected)
+                self.assertEqual(result["model_set"], expected)
+
     def test_none_selects_no_model_set_even_when_one_fits(self):
         result, _ = self.choose("codex-only", None, str(self.custom), "rigger", "none")
         self.assertEqual(result, {"path": str(self.custom), "model_set": None, "lead_role": "rigger"})
