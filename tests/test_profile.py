@@ -167,14 +167,15 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("harbor-master guide at", (self.home / ".codex/AGENTS.md").read_text())
 
     def assert_disabled(self, profile, message):
-        """T3 starts with only the note that names the problem: no Boat skill, guides, model or applied record."""
+        """T3 starts with only a note pointing to the log and status: no Boat skill, guides, model or applied record."""
         settings = json.loads((self.home / ".t3/userdata/settings.json").read_text())
         self.assertNotIn("defaultModelSelection", settings)
         for provider in boat_profile.PROVIDERS[profile]:
             base = self.home / BASES[provider]
             note = (base / FILES[provider]).read_text()
             self.assertIn("T3 Boat is not ready", note)
-            self.assertIn(message, note)
+            self.assertIn("t3-boat status` name the file", note)
+            self.assertNotIn(message, note)  # The diagnostic stays in the log and status, out of the managed block.
             self.assertNotIn("skills/", note)
             self.assertEqual([p for p in (base / "skills").rglob("*") if p.is_file()] if (base / "skills").exists()
                              else [], [])
@@ -338,6 +339,91 @@ class ProfileTests(unittest.TestCase):
         self.serve("codex-only")
         self.assertTrue(boat_profile.applied("codex-only"))
         self.assertIn("## Attached playbook", self.skill("codex"))
+
+    def test_an_interrupted_reapply_of_an_edited_package_leaves_no_record_until_it_completes(self):
+        # The saved choice stays the same while the package's contents change, so the earlier record would still
+        # match it: it must be gone before the first generated file changes, or workers would get the old guide
+        # while the lead's skills already describe the new one.
+        attachment = {"path": str(self.package), "model_set": "both-providers", "lead_role": "harbor-master"}
+        save(self.home, "codex+claude", attachment)
+        self.serve("codex+claude")
+        state = boat_profile.read_state("codex+claude")
+        steps = self.package / "crew/rigger/how/steps.md"
+        original = boat_profile.write
+        for label, run in (("container start", lambda: boat_profile.prepare("codex+claude")),
+                           ("setup with the same choice", lambda: boat_profile.prepare("codex+claude", state))):
+            with self.subTest(label):
+                steps.write_text(f"EDITED-STEPS for {label}\n")
+                written = []
+
+                def interrupted(path, data):
+                    if any(path.parent.name.startswith("playbook-harbor-crew-rigger-") for path in written):
+                        raise KeyboardInterrupt
+                    written.append(path)
+                    original(path, data)
+
+                with patch.object(boat_profile, "write", side_effect=interrupted), redirect_stderr(StringIO()), \
+                        self.assertRaises(KeyboardInterrupt):
+                    run()
+                guide = next(path for path in written if path.parent.name.startswith("playbook-harbor-crew-rigger-"))
+                self.assertIn(f"EDITED-STEPS for {label}", guide.read_text())  # The lead side already changed.
+                self.assertFalse(boat_profile.applied_path("codex+claude").exists())
+                with self.assertRaisesRegex(boat_profile.ProfileError, "not applied"):
+                    boat_profile.read_applied("codex+claude")  # So no worker starts from the earlier guide.
+                self.assertFalse(boat_profile.applied("codex+claude"))
+                self.serve("codex+claude")  # The next start finishes the run and only then publishes the record.
+                self.assertTrue(boat_profile.applied("codex+claude"))
+                roles = boat_profile.read_applied("codex+claude")[1]["roles"]
+                self.assertIn(f"EDITED-STEPS for {label}", roles["rigger"])
+                package = playbook.load(str(self.package))
+                for provider in boat_profile.OPTION:
+                    text = playbook_skills.skill_path(self.home / BASES[provider], package, "rigger").read_text()
+                    self.assertIn(f"EDITED-STEPS for {label}", text)
+
+    def test_a_package_error_holding_a_marker_line_cannot_break_the_next_start(self):
+        save(self.home, "codex+claude", {"path": str(self.package), "model_set": None, "lead_role": "harbor-master"})
+        self.serve("codex+claude")
+        manifest = self.package / "team.json"
+        original = manifest.read_text()
+        data = json.loads(original)
+        data["roles"][f"{boat_profile.END}\n{boat_profile.BEGIN}"] = data["roles"].pop("qa_bot")
+        manifest.write_text(json.dumps(data))
+        for start in (1, 2, 3):
+            with self.subTest(start=start):
+                result = self.serve("codex+claude", check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("T3 starts without the codex+claude profile", result.stderr)
+                self.assertIn(boat_profile.END, result.stderr)  # The log keeps the whole diagnostic.
+                for provider in boat_profile.OPTION:
+                    note = (self.home / BASES[provider] / FILES[provider]).read_text()
+                    self.assertEqual((note.count(boat_profile.BEGIN), note.count(boat_profile.END)), (1, 1))
+                    self.assertIn("T3 Boat is not ready", note)
+        manifest.write_text(original)
+        self.serve("codex+claude")
+        self.assertTrue(boat_profile.applied("codex+claude"))
+
+    def test_a_nul_byte_in_a_guide_disables_the_profile_before_any_worker(self):
+        save(self.home, "codex-only", {"path": str(self.package), "model_set": None, "lead_role": None})
+        self.serve("codex-only")
+        (self.package / "crew/rigger/how/steps.md").write_bytes(b"STEPS\0hidden\n")
+        result = self.serve("codex-only")
+        self.assertIn("steps.md: contains a NUL byte at offset 5", result.stderr)
+        self.assert_disabled("codex-only", "contains a NUL byte")
+
+    def test_lead_instructions_resolve_the_worker_project_before_delegating(self):
+        save(self.home, "codex-only")
+        self.serve("codex-only")
+        skill = self.skill("codex")
+        steps = skill[skill.index("## Start a worker"):skill.index("## Parent updates")]
+        resolve = steps.index("call `t3_project_list` with `environmentId` set to that environment ID")
+        delegate = steps.index("`delegate_task` with a `target` holding the linked `environmentId`, the resolved "
+                               "`projectId`, and the `providerInstanceId`, exact `model` and `options`")
+        self.assertLess(steps.index("**worker T3 project folder**"), resolve)
+        self.assertLess(resolve, delegate)
+        self.assertIn("whose `workspaceRoot` is the printed worker project folder", steps)
+        self.assertIn("never derive the project from the repository name, from the checkout path", steps)
+        worker = (ROOT / "bin/boat-worker").read_text()
+        self.assertIn('print(f"Worker T3 project folder: {folder}"', worker)  # The folder the skill matches.
 
     def test_an_unreadable_generated_file_is_replaced_and_an_unreadable_owner_file_is_named(self):
         save(self.home, "codex-only")

@@ -74,6 +74,16 @@ JSON
   printf '%s\n' '{"roles": {"boat": {"provider": "claude", "family": "opus", "effort": "high"}}}' > "$team/sets/solo.json"
 }
 
+# Copy a package written on the host under a restrictive umask into the container with the README's commands.
+# docker cp keeps the host user's numeric owner and modes, so only the README's chown makes it readable when that
+# user is not the container's (as on CI runners).
+copy_package() {  # NAME
+  docker cp "$host_dir/$1" "$container:/data/teams/$1"
+  docker exec -u 0 "$container" chown -R node:node "/data/teams/$1"
+  foreign=$(docker exec "$container" find "/data/teams/$1" ! -user node -print -quit)
+  [[ -z "$foreign" ]] || { echo "not owned by the container user after the README's chown: $foreign" >&2; exit 1; }
+}
+
 start() {
   container=$(docker run -d --network none -v "$volume:/data" -e "T3_BOAT_PROFILE=$profile" "$image")
   for _ in {1..60}; do
@@ -109,17 +119,15 @@ for profile in codex-only claude-only codex+claude; do
       if [[ $kind == bundled ]]; then
         answers=$'bundled\nlead\nclaude-only\n\n\n\n'
       else
-        t3_package
-        chmod -R a+rX "$host_dir/t3"
-        docker cp "$host_dir/t3" "$container:/data/teams/t3"
+        (umask 077; t3_package)
+        copy_package t3
         answers=$'/data/teams/t3\nboat\nsolo\n\n\n\n'
       fi ;;
     # A team that shares no role name, count or model set name with agent-playbook, copied in from the host
     # with the README's exact command into the directory every container start provides.
     codex+claude)
-      crew_package
-      chmod -R a+rX "$host_dir/crew"
-      docker cp "$host_dir/crew" "$container:/data/teams/crew"
+      (umask 077; crew_package)
+      copy_package crew
       answers=$'/data/teams/crew\nharbor-master\nduo\n\n\n\n' ;;
   esac
   # Exercise real setup, worker scripts and status against offline service doubles.
@@ -301,19 +309,36 @@ SH
     start
   }
   if [[ "$profile" == codex+claude ]]; then
-    # A package file the container user cannot read, then a missing manifest: each time T3 still starts, with
-    # only the note naming the file in place of the profile, and no Boat skill, guide or worker.
-    for damage in unreadable missing; do
-      if [[ $damage == unreadable ]]; then
-        docker exec -u 0 "$container" chmod 000 /data/teams/crew/people/qa_bot/ROLE.md
-        message='/data/teams/crew/people/qa_bot/ROLE.md: cannot be read: Permission denied'
-      else
-        docker exec -u 0 "$container" rm /data/teams/crew/team.json
-        message='/data/teams/crew/team.json is missing'
-      fi
-      restart
+    # Damage the package in turn: a file the container user cannot read, a role name holding the instruction
+    # files' END marker, a FIFO in place of the manifest, then no manifest. Each time T3 still starts, with only a
+    # note in place of the profile and no Boat skill, guide or worker; the log and status name the file. Restoring
+    # the package and restarting applies the profile again.
+    crew=/data/teams/crew
+    docker exec -u 0 "$container" cp -p "$crew/team.json" /data/team.json.orig
+    for damage in unreadable marker fifo missing; do
+      case $damage in
+        unreadable)
+          docker exec -u 0 "$container" chmod 000 "$crew/people/qa_bot/ROLE.md"
+          message="$crew/people/qa_bot/ROLE.md: cannot be read: Permission denied" ;;
+        marker)
+          docker exec -u 0 "$container" sh -ec 'jq ".roles[\"<!-- END t3-boat -->\"] = .roles.qa_bot | del(.roles.qa_bot)" \
+            /data/team.json.orig > "$1/team.json"' _ "$crew"
+          message="$crew/team.json: role '<!-- END t3-boat -->' needs a name" ;;
+        fifo)
+          docker exec -u 0 "$container" sh -ec 'rm "$1/team.json"; mkfifo -m 644 "$1/team.json"' _ "$crew"
+          message="$crew/team.json is not a regular file" ;;
+        missing)
+          docker exec -u 0 "$container" rm "$crew/team.json"
+          message="$crew/team.json is missing" ;;
+      esac
+      # The marker case is started twice: an earlier note quoting the marker broke the second start.
+      for attempt in 1 2; do
+        restart
+        [[ $damage == marker ]] || break
+      done
       logs=$(container_logs "$container")
-      require 'docker logs' "$logs" "$message. T3 starts without the codex+claude profile"
+      require 'docker logs' "$logs" "$message"
+      require 'docker logs' "$logs" "T3 starts without the codex+claude profile"
       status=$(incomplete_status "$container")
       require 't3-boat status' "$status" '[missing] Global profile codex+claude applied'
       require 't3-boat status' "$status" "$message"
@@ -326,20 +351,25 @@ SH
       for file in .codex/AGENTS.md .claude/CLAUDE.md; do
         text=$(docker exec "$container" cat "/data/$file")
         require "/data/$file" "$text" 'T3 Boat is not ready'
-        require "/data/$file" "$text" "$message"
+        require "/data/$file" "$text" 't3-boat status` name the file'
+        # The diagnostic stays out of the managed block: one BEGIN and one END marker.
+        [[ $text != *"$message"* ]] || { echo "/data/$file quotes the diagnostic" >&2; exit 1; }
+        [[ $(grep -c -- '<!-- END t3-boat -->' <<<"$text") == 1 ]] || { echo "/data/$file: marker block broken" >&2; exit 1; }
       done
       docker exec "$container" test ! -e /data/profiles/codex+claude.applied.json
       refused=$(docker exec -w /data/start-here "$container" boat-worker start 2>&1) && exit 1
       require 'boat-worker start' "$refused" 'profile is not applied, so no worker can start'
-      # Restoring the file and restarting applies the profile again.
+      [[ $damage != missing ]] || break
       if [[ $damage == unreadable ]]; then
-        docker exec -u 0 "$container" chmod 644 /data/teams/crew/people/qa_bot/ROLE.md
-        restart
-        status=$(status_output "$container")
-        require 't3-boat status' "$status" '[ok] Global profile codex+claude applied'
-        docker exec "$container" grep -Fq '| qa_bot | 2 |' /data/.claude/skills/t3-boat/SKILL.md
-        docker exec "$container" test -f /data/profiles/codex+claude.applied.json
+        docker exec -u 0 "$container" chmod 644 "$crew/people/qa_bot/ROLE.md"
+      else
+        docker exec -u 0 "$container" sh -ec 'rm -f "$1/team.json"; cp -p /data/team.json.orig "$1/team.json"' _ "$crew"
       fi
+      restart
+      status=$(status_output "$container")
+      require 't3-boat status' "$status" '[ok] Global profile codex+claude applied'
+      docker exec "$container" grep -Fq '| qa_bot | 2 |' /data/.claude/skills/t3-boat/SKILL.md
+      docker exec "$container" test -f /data/profiles/codex+claude.applied.json
     done
   else
     restart

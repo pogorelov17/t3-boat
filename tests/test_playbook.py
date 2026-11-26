@@ -131,6 +131,51 @@ class PackageTests(unittest.TestCase):
             with self.assertRaisesRegex(playbook.PlaybookError, "report.md: cannot be read: Permission denied"):
                 playbook.load(str(self.root))
 
+    def load_quickly(self, path):
+        """Load in a child process with a deadline, so a read that blocks fails the test instead of hanging it."""
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import playbook\n"
+                "try:\n    playbook.load(sys.argv[2])\nexcept playbook.PlaybookError as error:\n"
+                "    sys.exit(f'PlaybookError: {error}')\n")
+        return subprocess.run([sys.executable, "-c", code, str(ROOT / "lib"), str(path)], capture_output=True,
+                              text=True, timeout=20)
+
+    def test_nonregular_package_files_are_refused_without_blocking(self):
+        cases = {
+            "FIFO manifest": ("team.json", "fifo", "team.json is not a regular file"),
+            "directory manifest": ("team.json", "directory", "team.json is not a regular file"),
+            "FIFO bundle file": ("crew/rigger/how/steps.md", "fifo", "crew/rigger/how/steps.md is not a file"),
+            "FIFO model set": ("assignments/codex-crew.json", "fifo", "assignments/codex-crew.json is not a file"),
+        }
+        for label, (rel, kind, message) in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as folder:
+                root = write_package(Path(folder) / "pkg")
+                (root / rel).unlink()
+                os.mkfifo(root / rel) if kind == "fifo" else (root / rel).mkdir()
+                result = self.load_quickly(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+        # A FIFO in place of the optional commit file is ignored, not waited on.
+        root = write_package(self.root)
+        os.mkfifo(root / ".commit")
+        result = self.load_quickly(root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # A FIFO swapped in after a path was checked is still refused on the open file, at once.
+        fifo = Path(self.root.parent) / "swapped"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(playbook.NotRegularFile, "not a regular file"):
+            playbook.read_regular(fifo)
+
+    def test_nul_bytes_are_refused_in_every_package_file(self):
+        cases = {"manifest": "team.json", "guide": "crew/qa_bot/ROLE.md", "model set": "assignments/codex-crew.json"}
+        for label, rel in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as folder:
+                root = write_package(Path(folder) / "pkg")
+                path = root / rel
+                path.write_bytes(path.read_bytes() + b"\0")
+                with self.assertRaisesRegex(playbook.PlaybookError, f"{rel}: contains a NUL byte at offset"):
+                    playbook.load(str(root))
+
     def test_size_limits_are_checked_when_the_package_is_read(self):
         write_package(self.root, roles={"long": 1}, sets={})
         # A long guide that is still within the limits loads in full.

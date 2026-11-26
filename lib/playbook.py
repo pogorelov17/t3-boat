@@ -11,7 +11,9 @@ same read, even while the owner edits the directory.
 """
 import hashlib
 import json
+import os
 import re
+import stat
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +48,29 @@ def skill_name(package_name, role):
 
 class PlaybookError(ValueError):
     """The attached package is missing or malformed; the message names the file."""
+
+
+class NotRegularFile(OSError):
+    """A path that is a FIFO, device, socket or directory where a regular file is expected."""
+
+
+def read_regular(path, limit=-1):
+    """Read up to `limit` bytes of a regular file; anything else raises NotRegularFile without blocking.
+
+    The file is opened non-blocking and checked on the open descriptor, so a FIFO put at the path, even after an
+    earlier check, is refused at once instead of waiting for a writer.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    try:
+        regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    if not regular:
+        os.close(descriptor)
+        raise NotRegularFile(f"{path} is not a regular file")
+    with os.fdopen(descriptor, "rb") as handle:
+        return handle.read(limit)
 
 
 def _entries(value):
@@ -88,12 +113,15 @@ class Package:
         if not again and path in self._read:
             return self._read[path]
         try:
-            with open(path, "rb") as handle:
-                data = handle.read(MAX_FILE + 1)
+            data = read_regular(path, MAX_FILE + 1)
         except FileNotFoundError:
             if again:
                 return None
             raise PlaybookError(f"{path} is missing") from None
+        except NotRegularFile:
+            if again:
+                return None
+            raise PlaybookError(f"{path} is not a regular file") from None
         except (OSError, ValueError) as error:
             if again:
                 return None
@@ -108,14 +136,19 @@ class Package:
         return data
 
     def _text(self, path):
+        data = self._bytes(path)
         try:
-            return self._bytes(path).decode("utf-8")
+            text = data.decode("utf-8")
         except UnicodeDecodeError as error:
             raise PlaybookError(f"{path}: not UTF-8 text ({error})") from None
+        if "\0" in text:  # A shell script, and so a worker's bootstrap, cannot carry a NUL byte.
+            raise PlaybookError(f"{path}: contains a NUL byte at offset {data.index(0)}; package files must be text")
+        return text
 
     def _json(self, path):
+        text = self._text(path)  # Its own errors already name the file.
         try:
-            return json.loads(self._text(path))
+            return json.loads(text)
         except (ValueError, RecursionError) as error:
             raise PlaybookError(f"{path}: {error if isinstance(error, ValueError) else 'nested too deeply'}") from None
 
@@ -171,8 +204,7 @@ class Package:
         version = data.get("version")
         self.version = version if isinstance(version, str) and TEXT.fullmatch(version) else None
         try:
-            with open(self.root / ".commit", "rb") as handle:
-                commit = handle.read(128).decode("ascii", errors="replace").strip()
+            commit = read_regular(self.root / ".commit", 128).decode("ascii", errors="replace").strip()
         except (OSError, ValueError):
             commit = ""
         self.commit = commit if re.fullmatch(r"[0-9a-f]{7,64}", commit) else None

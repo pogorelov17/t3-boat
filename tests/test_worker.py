@@ -221,6 +221,55 @@ esac
         with self.assertRaisesRegex(playbook.PlaybookError, "ROLE.md: larger than 1048576 bytes"):
             playbook.load(str(package))
 
+    def test_a_nul_byte_in_the_applied_guide_is_refused_before_any_vm(self):
+        save(self.home, "codex+claude", self.attachment)
+        record = boat_profile.applied_path("codex+claude", self.home)
+        data = json.loads(record.read_text())
+        data["playbook"]["roles"]["rigger"] += "\0after"
+        record.write_text(json.dumps(data))  # A record edited by hand; the package itself is refused when read.
+        project, env = self.fake_boat("exit 1")
+        result = subprocess.run([ROOT / "bin/boat-worker", "start", "rigger"], cwd=project, text=True,
+                                capture_output=True, env=env | {"T3_BOAT_PROFILE": "codex+claude"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("contain a NUL byte", result.stderr)
+        self.assertFalse((self.home / "boat-calls").exists())
+        with self.assertRaisesRegex(ValueError, "NUL byte"):
+            worker.bootstrap(LEADS["codex-only"], "a\0b", ("codex",))
+
+    def test_link_reports_the_environment_and_the_worker_project_folder(self):
+        environment = "6f1c1a0e-7d55-4a43-9d4b-2a0d3c0f1e2a"
+        replies = {'cat "$HOME/.t3/userdata/environment-id"': environment,
+                   'cd "$HOME/t3-worker" && pwd -P': "/home/user/t3-worker",
+                   '"$HOME/t3-worker-runtime/node_modules/.bin/t3" auth pairing create --ttl 2m --json':
+                       json.dumps({"credential": "secret-token"})}
+        calls = []
+
+        def output(*args, stdin=None):
+            calls.append(args)
+            return "" if args[3] == worker.RUN_STDIN else replies[args[3]]
+
+        class Tunnel:
+            def poll(self):
+                return None
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with patch.object(worker, "output", side_effect=output), \
+                patch.object(worker.subprocess, "Popen", return_value=Tunnel()), \
+                patch.object(worker.urllib.request, "urlopen", return_value=Response()), \
+                patch.object(worker.subprocess, "run") as run, patch("builtins.print") as printed:
+            worker.link("bx_1", "SCRIPT")
+        lines = [call.args[0] for call in printed.call_args_list]
+        self.assertEqual(lines, [f"Boat bx_1 linked to T3 environment {environment}",
+                                 "Worker T3 project folder: /home/user/t3-worker"])
+        self.assertEqual(run.call_args.args[0][:3], ["t3", "environment", "link"])
+        self.assertNotIn("secret-token", " ".join(lines))
+
     def test_an_unbound_stub_refuses_before_any_vm(self):
         save(self.home, "codex-only")
         stub = self.home / "start-here"

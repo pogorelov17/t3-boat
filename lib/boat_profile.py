@@ -52,7 +52,7 @@ def write(target, content):
     """Replace `target` with `content` in one step; a generated file that cannot be read is simply replaced."""
     data = content.encode()
     try:
-        if target.read_bytes() == data:
+        if playbook.read_regular(target) == data:
             return
     except OSError:
         pass
@@ -71,7 +71,7 @@ def write(target, content):
 def read_owned(path, default=""):
     """The text of a file the owner may also edit, or `default` when there is none; errors name the file."""
     try:
-        return path.read_text(encoding="utf-8")
+        return playbook.read_regular(path).decode("utf-8")
     except FileNotFoundError:
         return default
     except (OSError, UnicodeDecodeError) as error:
@@ -159,7 +159,9 @@ def saved(target, missing=None):
         kind = "a directory" if stat.S_ISDIR(mode) else "not a regular file"
         raise ProfileError(f"{target}: is {kind}; expected a JSON profile")
     try:
-        original = target.read_bytes()
+        original = playbook.read_regular(target)  # Checked again on the open file: a FIFO never blocks here.
+    except playbook.NotRegularFile:
+        raise ProfileError(f"{target}: is not a regular file; expected a JSON profile") from None
     except OSError as error:  # For example, a file the container user may not read.
         raise ProfileError(f"{target}: cannot be read: {error.strerror or error}") from None
     try:
@@ -271,7 +273,10 @@ def plan(name, state=None, warn=None, loaded=None):
                 raise
             warn(f"{error}. T3 starts without the {name} profile until the playbook is restored or setup "
                  "attaches another one")
-            state, reason = None, f"its attached playbook cannot be read ({error})"
+            # The diagnostic goes to the log and t3-boat status only: package text, such as a role name, could
+            # otherwise put a marker line inside the managed block and break the next start.
+            state, reason = None, ("its attached playbook cannot be read; the container log and "
+                                   "`docker exec t3-boat t3-boat status` name the file")
     enabled = PROVIDERS[name]
     path = settings_path(home)
     try:
@@ -307,7 +312,7 @@ def plan(name, state=None, warn=None, loaded=None):
         skill_path = base / "skills/t3-boat/SKILL.md"
         if state is None or provider not in enabled:
             try:
-                if SKILL_MARK in skill_path.read_text(encoding="utf-8", errors="replace"):
+                if SKILL_MARK in playbook.read_regular(skill_path).decode("utf-8", errors="replace"):
                     removals.append(skill_path)
             except OSError:
                 pass
@@ -367,9 +372,11 @@ def applied(name):
 def prepare(name, state=None, loaded=None):
     """Write the saved choices (when setup passes `state`) and regenerate every file derived from them.
 
-    The profile file is written first, in one atomic step: it is the whole choice. The generated files follow,
-    and the applied record last; if that is interrupted, the next container start or setup regenerates them, and
-    until then t3-boat status reports the profile as not applied and boat-worker refuses to start a worker.
+    The applied record is removed before anything changes. The profile file is then written in one atomic step:
+    it is the whole choice. The generated files follow, and a new applied record is written only once all of them
+    are in place. If that is interrupted, even when the saved choice did not change, no record is left, so
+    boat-worker refuses to start a worker and t3-boat status reports the profile as not applied until the next
+    container start or setup regenerates every file.
     `loaded` is what check_attachment returned for `state`, when the caller already read the package.
     """
     check_profile_name(name)
@@ -383,15 +390,20 @@ def prepare(name, state=None, loaded=None):
         record = applied_path(name, home)
         if record in removals:
             removals.remove(record)
-            record.unlink(missing_ok=True)
         last = writes.pop(record, None)
+        # Invalidate the record before the first change: the saved choice can be unchanged while the package's
+        # contents changed, so an interrupted run must not leave the earlier record describing new lead files.
+        try:
+            record.unlink(missing_ok=True)
+        except OSError as error:
+            raise ProfileError(f"{record}: cannot be removed: {error.strerror or error}") from None
         if state is not None:
             write(profile_path(name, home), json.dumps(state, indent=2) + "\n")
         for path, data in writes.items():
             write(path, data)
         playbook_skills.remove(removals)
         if last is not None:
-            write(record, last)
+            write(record, last)  # Published only after every other file is in place.
     for notice in notices:
         print(f"T3 Boat: {notice}.", file=sys.stderr)
 

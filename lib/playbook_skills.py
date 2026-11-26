@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-from playbook import skill_name
+from playbook import read_regular, skill_name
 
 MARK = "<!-- t3-boat: generated from an attached playbook"
 
@@ -35,7 +35,7 @@ def skill_text(package, role, lead_role):
 def generated(path):
     """Whether a file was written by t3-boat; anything else, including a directory, belongs to the owner."""
     try:
-        return MARK in path.read_text(encoding="utf-8", errors="replace")
+        return MARK in read_regular(path).decode("utf-8", errors="replace")
     except OSError:
         return False
 

@@ -53,7 +53,7 @@ claude auth status 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.st
 # Instructions for a worker started without a playbook role: the lead's brief decides its job.
 WORKER_NOTE = f"""You are a worker on a disposable Boat VM, started by the T3 team lead. Your brief from the lead is your task; it decides what you do, what you deliver and in what form.
 
-- Do all source inspection, edits, project commands, tests, dependency installs, builds and clones here on this VM. If the brief names a repository, verify that a local checkout's origin matches it before using it, or clone it here.
+- Do all source inspection, edits, project commands, tests, dependency installs, builds and clones here on this VM. You start in a scratch folder; a checkout can be elsewhere under your home. If the brief names a repository, verify that a local checkout's origin matches it before using it, or clone it here.
 - Publish nothing the brief does not ask for. If it leaves the form of delivery open, keep your changes on this VM and describe them in your result.
 - You may split your work further only when the brief allows it and your tools support it. Name in your result what you handed on, to whom, and what came back.
 - End with a compact result for the lead. {playbook_skills.REPORTING} Link to details instead of pasting long logs."""
@@ -90,6 +90,9 @@ printf '%s\\n' {shlex.quote(block)} >> "$guide"
 
 def bootstrap(lead, guide, providers):
     """The VM setup script: T3 opens with the lead model and enables every provider in `providers`."""
+    if not isinstance(guide, str) or "\0" in guide:  # A shell script cannot carry a NUL byte.
+        raise ValueError("The worker instructions contain a NUL byte or are not text, so no worker can start. "
+                         "Repair the playbook file, then restart the container or rerun t3-boat setup")
     provider = lead["provider"]
     providers = tuple(providers)
     settings = {
@@ -149,6 +152,11 @@ def link(vm, script):
         else:
             raise RuntimeError("T3 worker did not become ready")
         environment = str(uuid.UUID(remote('cat "$HOME/.t3/userdata/environment-id"')))
+        # T3 on the VM registers the folder it started in as its project. A repository checkout on the VM can be
+        # in another folder, so the lead resolves the project ID from this folder with t3_project_list.
+        folder = remote('cd "$HOME/t3-worker" && pwd -P')
+        if not folder.startswith("/") or "\n" in folder:
+            raise RuntimeError("Unrecognized worker project folder")
         cert = json.loads(remote('"$HOME/t3-worker-runtime/node_modules/.bin/t3" auth pairing create --ttl 2m --json'))
         token = next((cert.get(k) for k in ("credential", "pairingCode", "code", "token", "pairingToken")
                       if isinstance(cert.get(k), str)), None)
@@ -157,6 +165,7 @@ def link(vm, script):
         subprocess.run(["t3", "environment", "link", "--from", "-", "--access", "auto"],
                        input=f"{url} {token}\n", text=True, check=True, stdout=subprocess.DEVNULL)
         print(f"Boat {vm} linked to T3 environment {environment}", flush=True)
+        print(f"Worker T3 project folder: {folder}", flush=True)
     except BaseException:
         if tunnel.poll() is None:
             tunnel.terminate()

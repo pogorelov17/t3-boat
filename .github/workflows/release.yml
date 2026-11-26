@@ -2,6 +2,7 @@ name: Test and release Docker image
 on:
   pull_request:
   push:
+    branches: [main]
     tags: ['v*']
 
 permissions:
@@ -34,16 +35,16 @@ jobs:
         run: |
           docker build --build-arg BUNDLE_PLAYBOOK=1 -t t3-boat:bundled .
           bash tests/smoke-image.sh t3-boat:bundled bundled
-      - name: Export tested image for release
-        if: startsWith(github.ref, 'refs/tags/')
+      # Every run keeps the generic image it tested: a release publishes it, and the README's install path can
+      # load it for an untagged commit.
+      - name: Export the tested image
         run: docker save t3-boat:test | zstd -T0 -3 -o image.tar.zst
       - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: tested-${{ matrix.arch }}
           path: image.tar.zst
           compression-level: 0
-          retention-days: 1
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 1 || 7 }}
 
   publish:
     needs: image
