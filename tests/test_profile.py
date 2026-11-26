@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -468,15 +470,20 @@ class ProfileTests(unittest.TestCase):
         worker = (ROOT / "bin/boat-worker").read_text()
         self.assertIn('print(f"Worker T3 project folder: {folder}"', worker)  # The folder the skill matches.
 
-    def test_an_unreadable_generated_file_is_replaced_and_an_unreadable_owner_file_is_named(self):
+    def test_an_unreadable_boat_skill_is_kept_and_an_unreadable_owner_file_is_named(self):
         save(self.home, "codex-only")
         self.serve("codex-only")
         if os.geteuid() == 0:
             self.skipTest("root reads every file")
         skill = self.home / ".codex/skills/t3-boat/SKILL.md"
         skill.chmod(0)
+        result = self.serve("codex-only")  # Whose file it is cannot be read, so it is not replaced.
+        self.assertIn(f"{skill} is not a Boat skill t3-boat generated", result.stderr)
+        self.assertIn("T3 Boat is not ready", (self.home / ".codex/AGENTS.md").read_text())
+        skill.chmod(0o600)
         self.serve("codex-only")
         self.assertIn("# Boat project workflow", skill.read_text())
+        self.assertTrue(boat_profile.applied("codex-only"))
         settings = self.home / ".t3/userdata/settings.json"
         settings.chmod(0)
         self.addCleanup(settings.chmod, 0o600)
@@ -484,6 +491,164 @@ class ProfileTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f"{settings}: cannot be read: Permission denied", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+    def use_home(self, home):
+        """Run the next starts in another, empty data volume."""
+        home.mkdir(parents=True)
+        self.home = home
+        self.env["HOME"] = str(home)
+        os.environ["HOME"] = str(home)
+
+    def guides(self, base, package):
+        return [playbook_skills.skill_path(base, package, role) for role in package.roles]
+
+    def assert_applied_through_aliases(self, profile, package, lead_role):
+        """Every file the enabled providers' instructions name exists, through each provider's own path."""
+        self.assertTrue(boat_profile.applied(profile))
+        for provider in boat_profile.PROVIDERS[profile]:
+            base = self.home / BASES[provider]
+            skill = base / "skills/t3-boat/SKILL.md"
+            self.assertTrue(boat_profile.generated_skill(skill), skill)
+            note = (base / FILES[provider]).read_text()
+            self.assertIn(f"load and follow {skill} automatically", note)
+            text = skill.read_text()
+            if package is None:
+                self.assertIn("## Workers and briefs", text)
+                continue
+            for guide in self.guides(base, package):
+                self.assertTrue(playbook_skills.generated(guide), guide)
+            self.assertNotIn("not installed", text)
+            for path in re.findall(r"\| (/[^ |]+/SKILL\.md) \|", text):
+                self.assertTrue(Path(path).is_file(), path)  # The skill's table names only files that exist.
+            lead = playbook_skills.skill_path(base, package, lead_role)
+            self.assertIn(f"guide at {lead} before your first response", note)
+            self.assertTrue(lead.is_file())
+
+    def test_aliased_skill_folders_keep_active_guides_in_both_directions(self):
+        root = self.home
+        other = write_package(root / "teams/other", name="other-crew", roles={"solo": 1}, sets={})
+        for real, alias in (("codex", "claudeAgent"), ("claudeAgent", "codex")):
+            for profile in ("codex-only", "claude-only", "codex+claude"):
+                with self.subTest(alias=f"{BASES[alias]}/skills -> {BASES[real]}/skills", profile=profile):
+                    self.use_home(root / "volumes" / f"{real}-{profile}")
+                    (self.home / BASES[real] / "skills").mkdir(parents=True)
+                    (self.home / BASES[alias]).mkdir()
+                    (self.home / BASES[alias] / "skills").symlink_to(self.home / BASES[real] / "skills",
+                                                                     target_is_directory=True)
+                    package = write_package(self.home / "teams/harbor")
+                    loaded = playbook.load(str(package))
+                    owner = self.home / BASES[real] / "skills/team-notes/SKILL.md"
+                    owner.parent.mkdir()
+                    owner.write_text("my notes\n")
+                    attachment = {"path": str(package), "model_set": None, "lead_role": "rigger"}
+                    save(self.home, profile, attachment)
+                    for _ in range(2):  # Attach, then refresh unchanged.
+                        result = self.serve(profile)
+                        self.assertNotIn("not installed", result.stderr)
+                        self.assert_applied_through_aliases(profile, loaded, "rigger")
+                    # Refresh after the package changed: each guide is rewritten in place, not removed.
+                    (package / "crew/rigger/how/steps.md").write_text("EDITED-STEPS\n")
+                    self.serve(profile)
+                    self.assert_applied_through_aliases(profile, playbook.load(str(package)), "rigger")
+                    self.assertIn("EDITED-STEPS", playbook_skills.skill_path(
+                        self.home / BASES[real], loaded, "rigger").read_text())
+                    # Attaching another package removes the earlier package's guides as ordinary stale files.
+                    save(self.home, profile, {"path": str(other), "model_set": None, "lead_role": "solo"})
+                    self.serve(profile)
+                    self.assert_applied_through_aliases(profile, playbook.load(str(other)), "solo")
+                    for guide in self.guides(self.home / BASES[real], loaded):
+                        self.assertFalse(guide.parent.exists(), guide)
+                    # Detaching leaves the Boat skill without a playbook for every enabled provider.
+                    save(self.home, profile, None)
+                    self.serve(profile)
+                    self.assert_applied_through_aliases(profile, None, None)
+                    self.assertEqual(sorted(p.parent.name for p in (self.home / BASES[real] / "skills").glob("*/SKILL.md")),
+                                     ["t3-boat", "team-notes"])
+                    self.assertEqual(owner.read_text(), "my notes\n")
+                    self.assertTrue((self.home / BASES[alias] / "skills").is_symlink())
+
+    def test_aliased_configuration_folders_keep_the_boat_skill_of_the_enabled_provider(self):
+        # CLAUDE_CONFIG_DIR naming the Codex home: both providers' skills are one folder.
+        self.env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"] = str(self.home / ".codex")
+        save(self.home, "codex-only", {"path": str(self.package), "model_set": None, "lead_role": "harbor-master"})
+        self.serve("codex-only")
+        self.serve("codex-only")
+        self.assertTrue(boat_profile.generated_skill(self.home / ".codex/skills/t3-boat/SKILL.md"))
+        for guide in self.guides(self.home / ".codex", playbook.load(str(self.package))):
+            self.assertTrue(guide.is_file())
+        self.assertTrue(boat_profile.applied("codex-only"))
+
+    def test_owner_boat_skill_is_never_replaced_or_removed(self):
+        skill = self.home / ".codex/skills/t3-boat/SKILL.md"
+        header = "---\nname: t3-boat\ndescription: Mine\n---\n\n"
+        owned = {
+            "marker in the body": header + f"My notes. Example of the generated line:\n{boat_profile.SKILL_MARK}\n",
+            "marker first, other name": f"---\nname: mine\ndescription: x\n---\n\n{boat_profile.SKILL_MARK}\n",
+            "no front matter": f"{boat_profile.SKILL_MARK}\n# My Boat notes\n",
+        }
+        for label, contents in owned.items():
+            with self.subTest(label):
+                skill.parent.mkdir(parents=True, exist_ok=True)
+                skill.write_text(contents)
+                self.assertFalse(boat_profile.generated_skill(skill))
+                profile_file = self.home / "profiles/codex-only.json"
+                profile_file.unlink(missing_ok=True)
+                self.serve("codex-only")  # Not configured yet.
+                self.assertEqual(skill.read_text(), contents)
+                save(self.home, "codex-only", {"path": str(self.home / "teams/missing"), "model_set": None,
+                                               "lead_role": None})
+                self.serve("codex-only")  # Configured with a package that cannot be read.
+                self.assertEqual(skill.read_text(), contents)
+                save(self.home, "codex-only")
+                result = self.serve("codex-only")  # Configured: kept, and the profile is not applied.
+                self.assertEqual(skill.read_text(), contents)
+                self.assertIn(f"{skill} is not a Boat skill t3-boat generated", result.stderr)
+                self.assertIn("T3 Boat is not ready", (self.home / ".codex/AGENTS.md").read_text())
+                self.assertFalse(boat_profile.applied_path("codex-only").exists())
+                with self.assertRaisesRegex(boat_profile.ProfileError, "is not a Boat skill t3-boat generated"):
+                    boat_profile.applied("codex-only")
+                with redirect_stderr(StringIO()), self.assertRaisesRegex(boat_profile.ProfileError, "move it"):
+                    boat_profile.prepare("codex-only", {"lead": LEADS["codex-only"], "playbook": None})
+                self.assertEqual(skill.read_text(), contents)
+                save(self.home, "claude-only")
+                self.serve("claude-only")  # A provider the profile does not enable.
+                self.assertEqual(skill.read_text(), contents)
+                self.assertTrue(boat_profile.applied("claude-only"))
+        skill.unlink()
+        save(self.home, "codex-only")
+        self.serve("codex-only")
+        self.assertTrue(boat_profile.generated_skill(skill))
+        self.assertTrue(boat_profile.applied("codex-only"))
+
+    def test_a_linked_boat_skill_is_never_written_through_or_removed(self):
+        save(self.home, "codex-only")
+        self.serve("codex-only")
+        generated = (self.home / ".codex/skills/t3-boat/SKILL.md").read_text()
+        skills = self.home / ".codex/skills"
+        outside = self.home / "outside"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text(generated)  # Even a copy of the generated text, reached through a link.
+        links = {"folder": (skills / "t3-boat", outside), "file": (skills / "t3-boat/SKILL.md", outside / "SKILL.md")}
+        for label, (link, target) in links.items():
+            with self.subTest(label):
+                if (skills / "t3-boat").is_symlink():
+                    (skills / "t3-boat").unlink()
+                else:
+                    shutil.rmtree(skills / "t3-boat")
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
+                for state in ("configured", "detached provider", "unconfigured"):
+                    if state == "configured":
+                        save(self.home, "codex-only")
+                    elif state == "detached provider":
+                        save(self.home, "claude-only")
+                    else:
+                        (self.home / "profiles/codex-only.json").unlink()
+                    result = self.serve("claude-only" if state == "detached provider" else "codex-only")
+                    self.assertTrue(link.is_symlink(), state)
+                    self.assertEqual((outside / "SKILL.md").read_text(), generated, state)
+                    if state == "configured":
+                        self.assertIn("is not a Boat skill t3-boat generated", result.stderr)
 
     def test_codex_override_on_the_server_is_refused(self):
         save(self.home, "codex-only")

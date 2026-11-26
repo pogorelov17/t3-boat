@@ -18,7 +18,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 # A copy of agent-playbook that an image built with BUNDLE_PLAYBOOK=1 contains (scripts/fetch-playbook); setup
-# offers it as "bundled" only when it is there. The default image has none and never fetches one.
+# offers it as "bundled" only when it is there. The default image has none and never fetches one on its own; setup
+# downloads the suggested one into the volume only when the owner selects it (playbook_fetch.py).
 BUNDLED = ROOT / "playbook"
 # Package provider names and the T3 provider instance each one runs on, in display order.
 PROVIDER_IDS = {"codex": "codex", "claude": "claudeAgent"}

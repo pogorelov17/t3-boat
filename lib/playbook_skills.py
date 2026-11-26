@@ -60,29 +60,39 @@ def obstacle(base, path):
     return None
 
 
+def physical(path):
+    """The file a path reaches once every link is resolved: one key for a file seen through aliased folders, such
+    as `~/.claude/skills` linked to `~/.codex/skills`, so it is planned once and never removed while wanted."""
+    return Path(os.path.realpath(path))
+
+
 def plan(bases, enabled, package, lead_role=None):
     """Return (files to write, generated files to remove, kept custom files, blocked guides).
 
     `bases` maps each provider instance to its configuration directory; `enabled` lists the active ones. Without
     a package nothing is wanted, so every guide t3-boat generated earlier is removed. Kept files are regular files
     the owner made at a guide path. Blocked guides are (guide path, obstacle) pairs where something else occupies
-    the path; they are neither written nor named to the team lead.
+    the path; they are neither written nor named to the team lead. Wanted and stale guides are compared by the file
+    they reach: a guide an enabled provider wants is never removed through a disabled provider's aliased folder.
     """
     writes, removals, kept, blocked = {}, [], [], []
+    wanted = set()
     for provider, base in bases.items():
-        wanted = set()
-        if package is not None and provider in enabled:
-            for role in package.roles:
-                path = skill_path(base, package, role)
-                wanted.add(path)
-                if (found := obstacle(base, path)) is not None:
-                    blocked.append((path, found))
-                elif path.is_file() and not generated(path):
-                    kept.append(path)
-                else:
-                    writes[path] = skill_text(package, role, lead_role)
+        if package is None or provider not in enabled:
+            continue
+        for role in package.roles:
+            path = skill_path(base, package, role)
+            wanted.add(physical(path))
+            if (found := obstacle(base, path)) is not None:
+                blocked.append((path, found))
+            elif path.is_file() and not generated(path):
+                kept.append(path)
+            else:
+                writes[path] = skill_text(package, role, lead_role)
+    for base in bases.values():
         for path in sorted((Path(base) / "skills").glob("playbook-*/SKILL.md")):
-            if path not in wanted and generated(path):
+            if (key := physical(path)) not in wanted and generated(path):
+                wanted.add(key)  # Listed once, also when a second provider's folder reaches the same file.
                 removals.append(path)
     return writes, removals, kept, blocked
 

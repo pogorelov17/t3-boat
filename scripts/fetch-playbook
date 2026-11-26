@@ -1,7 +1,8 @@
 #!/bin/sh
 # Fetch the pinned agent-playbook commit into DIRECTORY. Only an image built with BUNDLE_PLAYBOOK=1 runs this, at
 # build time, and setup offers the result as the optional `bundled` playbook; a running installation never fetches
-# it. PLAYBOOK_REPOSITORY may name a mirror: the commit ID below still pins every file.
+# it on its own. PLAYBOOK_REPOSITORY may name a mirror: the commit ID below still pins every file. Setup downloads
+# the same commit (lib/playbook_fetch.py) only when the owner enters `agent-playbook`, and runs no code from it.
 set -eu
 repository=${PLAYBOOK_REPOSITORY:-https://github.com/pogorelov17/agent-playbook.git}
 commit=a27b16a7d6962df7b26fc3233b8503f973f8d715

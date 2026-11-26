@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import boat_profile
 import playbook
+import playbook_fetch
 from boat_profile import PARENT, read_profile, read_state, write
 from model_picker import configure
 
@@ -273,6 +274,10 @@ def choose_playbook(profile, current):
     """Ask whether to attach an external playbook package. Returns (attachment to save, loaded package), or
     (None, None).
 
+    Entering `agent-playbook` downloads the suggested package at its pinned commit into /data/teams, as data,
+    and attaches it like any other path; nothing is downloaded unless the owner enters it. A failed download
+    leaves the current choice in place and asks again.
+
     The package is the read the owner saw here: its roles, counts and model sets. Setup passes it on, so the model
     suggestion and every generated file describe that same release even if the path is switched to another one
     while the owner answers. The attachment keeps the path as entered (for example a link to the current
@@ -289,7 +294,12 @@ def choose_playbook(profile, current):
           "briefs every worker itself. It applies to every project of this profile; nothing is added to your "
           "repositories.")
     print(f"Current playbook: {describe(current)}")
+    suggested = playbook_fetch.destination(Path.home() / "teams")
+    print(f"Suggested: agent-playbook, {playbook_fetch.URL} at commit {playbook_fetch.COMMIT[:12]}. Enter "
+          f"'agent-playbook' to download that commit into {suggested} and attach it; it is read as data and nothing "
+          "from it runs here. Nothing is downloaded unless you enter it.")
     choices = "Enter to keep it, 'none' to detach" if current else "Enter for none"
+    choices += ", 'agent-playbook' for the suggested playbook"
     if bundled:
         choices += f", 'bundled' for {bundled.label()}"
     choices += ", or the absolute path of a package directory in the container (for example under /data/teams)"
@@ -304,6 +314,16 @@ def choose_playbook(profile, current):
             return None, None
         elif reply.lower() == "bundled" and bundled:
             path = str(bundled.root)
+        elif reply.lower() == "agent-playbook":
+            print(f"Downloading {playbook_fetch.URL} at commit {playbook_fetch.COMMIT} ...", flush=True)
+            try:
+                path = str(playbook_fetch.fetch(Path.home() / "teams"))
+            except playbook_fetch.FetchError as error:
+                other = "Enter to keep the current playbook, 'none' to detach it" if current else "Enter for none"
+                print(f"agent-playbook could not be downloaded: {error}. Nothing was changed. Check this server's "
+                      f"network and enter 'agent-playbook' to retry, {other}, or the path of a package directory "
+                      "in the container.")
+                continue
         else:
             path = reply
         try:

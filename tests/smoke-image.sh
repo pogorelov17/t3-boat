@@ -112,8 +112,9 @@ for profile in codex-only claude-only codex+claude; do
     docker exec "$container" python3 -c 'import sys; sys.path.insert(0, "/opt/t3-boat/lib"); from model_catalog import provider_snapshot; assert any(p["instanceId"] == "codex" for p in provider_snapshot("codex")["providers"])'
   fi
   case "$profile" in
-    # No playbook: choose the lead model by number (the provider is the only one), then accept.
-    codex-only) answers=$'\n2\n3\n\n\n\n' ;;
+    # The suggested playbook cannot be downloaded without a network: setup says so, changes nothing and asks
+    # again; Enter then attaches none. Choose the lead model by number (the provider is the only one), then accept.
+    codex-only) answers=$'agent-playbook\n\n2\n3\n\n\n\n' ;;
     # Every choice is explicit: the role for the team lead and the model set, then the suggested lead model.
     claude-only)
       if [[ $kind == bundled ]]; then
@@ -221,6 +222,37 @@ SH
       [[ ! ${generic_text,,} =~ draft|pull\ request|task\ branch ]] ||
         { echo "generic instructions name a branch or pull request rule: ${BASH_REMATCH[0]}" >&2; exit 1; }
       require 't3-boat status' "$status" 'Playbook: none'
+      require 't3-boat setup' "$setup_output" "Suggested: agent-playbook, https://github.com/pogorelov17/agent-playbook at commit a27b16a7d696."
+      require 't3-boat setup' "$setup_output" "Enter for none, 'agent-playbook' for the suggested playbook"
+      require 't3-boat setup' "$setup_output" 'agent-playbook could not be downloaded: git fetch failed'
+      require 't3-boat setup' "$setup_output" "Nothing was changed. Check this server's network and enter 'agent-playbook' to retry"
+      [[ -z $(docker exec "$container" ls /data/teams) ]] || { echo "a failed download left files in /data/teams" >&2; exit 1; }
+      # The image's git downloads a pinned commit as plain data, here from a repository inside the container.
+      docker exec "$container" sh -eu <<'SH'
+repository=$(mktemp -d)
+mkdir "$repository/guides"
+printf '# deckhand\n\nINSTRUCTIONS-FOR-deckhand\n' > "$repository/guides/deckhand.md"
+printf '#!/bin/sh\ntouch /data/package-code-ran\n' > "$repository/check.sh"
+chmod 755 "$repository/check.sh"
+printf '{"schema": 1, "name": "deck-crew", "roles": {"deckhand": {"instances": 1, "bundle": ["guides/deckhand.md"]}}}' > "$repository/team.json"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+git -C "$repository" init --quiet && git -C "$repository" add -A && git -C "$repository" commit --quiet -m package
+commit=$(git -C "$repository" rev-parse HEAD)
+teams=$(mktemp -d)
+python3 - "$teams" "file://$repository" "$commit" <<'PYTHON'
+import os, sys
+sys.path.insert(0, "/opt/t3-boat/lib")
+import playbook, playbook_fetch
+target = playbook_fetch.fetch(sys.argv[1], repository=sys.argv[2], commit=sys.argv[3])
+package = playbook.load(str(target))
+assert package.commit == sys.argv[3] and list(package.roles) == ["deckhand"], package.label()
+assert "INSTRUCTIONS-FOR-deckhand" in package.bundle("deckhand")
+assert not os.access(target / "check.sh", os.X_OK)
+assert sorted(os.listdir(sys.argv[1])) == [target.name]
+PYTHON
+test ! -e /data/package-code-ran
+rm -rf "$repository" "$teams"
+SH
       worker_role=
       worker_text='You are a worker on a disposable Boat VM, started by the T3 team lead.'
       ;;
@@ -374,8 +406,29 @@ SH
       docker exec "$container" grep -Fq '| qa_bot | 2 |' /data/.claude/skills/t3-boat/SKILL.md
       docker exec "$container" test -f /data/profiles/codex+claude.applied.json
     done
-  else
+  elif [[ "$profile" == codex-only ]]; then
+    # Claude's skill folder linked to Codex's: the disabled provider's path reaches the active Boat skill, which
+    # must survive the restart. An owner's skill quoting the generated marker is kept as well.
+    docker exec "$container" sh -ec 'mkdir -p /data/.claude && ln -s /data/.codex/skills /data/.claude/skills
+      mkdir /data/.codex/skills/notes
+      printf "%s\n" "---" "name: notes" "description: mine" "---" "" "$1" > /data/.codex/skills/notes/SKILL.md' _ \
+      '<!-- t3-boat: generated from the T3 Boat profile. t3-boat replaces and removes this file. -->'
     restart
+    restart
+    status=$(status_output "$container")
+    require 't3-boat status' "$status" '[ok] Global profile codex-only applied'
+    docker exec "$container" grep -Fq '## Workers and briefs' /data/.claude/skills/t3-boat/SKILL.md
+    docker exec "$container" test -L /data/.claude/skills
+    docker exec "$container" grep -Fq 'name: notes' /data/.codex/skills/notes/SKILL.md
+  elif [[ "$profile" == claude-only ]]; then
+    # An owner's Boat skill for the provider this profile does not enable stays, even quoting the marker.
+    docker exec "$container" sh -ec 'mkdir -p /data/.codex/skills/t3-boat
+      printf "%s\n" "---" "name: t3-boat" "description: mine" "---" "" "Mine. $1" > /data/.codex/skills/t3-boat/SKILL.md' _ \
+      '<!-- t3-boat: generated from the T3 Boat profile. t3-boat replaces and removes this file. -->'
+    restart
+    docker exec "$container" grep -Fq 'description: mine' /data/.codex/skills/t3-boat/SKILL.md
+    status=$(status_output "$container")
+    require 't3-boat status' "$status" '[ok] Global profile claude-only applied'
   fi
   [[ $(docker exec "$container" cat /data/.t3/userdata/environment-id) = "$environment" ]]
   docker exec "$container" t3 thread list --project /data/start-here --json |

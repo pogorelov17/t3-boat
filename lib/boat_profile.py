@@ -39,8 +39,11 @@ OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
 MISSING = object()  # A saved profile that does not exist, as opposed to one holding JSON null.
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
-# The first line after the front matter of the generated Boat skill; only a file carrying it is ever removed.
+# The first line after the front matter of the generated Boat skill. Only a regular file that starts with the Boat
+# skill's front matter followed by this line is generated (see generated_skill); t3-boat never replaces or removes
+# anything else at the skill's path.
 SKILL_MARK = "<!-- t3-boat: generated from the T3 Boat profile. t3-boat replaces and removes this file. -->"
+SKILL_HEADER = re.compile(r"---\nname: t3-boat\ndescription: [^\n]*\n---\n\n" + re.escape(SKILL_MARK) + r"\n")
 VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:_/-]*")
 
 
@@ -245,6 +248,47 @@ def settings_path(home):
     return Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
 
 
+def boat_skill_path(base):
+    return base / "skills/t3-boat/SKILL.md"
+
+
+def generated_skill(path):
+    """Whether `path` holds a Boat skill t3-boat generated: a regular file, reached through no link at its own
+    folder or name, that starts with the generated header. A file that only quotes the marker belongs to the owner."""
+    try:
+        if path.parent.is_symlink() or path.is_symlink():
+            return False
+        return SKILL_HEADER.match(playbook.read_regular(path).decode("utf-8", errors="replace")) is not None
+    except OSError:
+        return False
+
+
+def skill_occupant(base, path):
+    """What keeps t3-boat from writing the Boat skill at `path`, or None: a link, a non-directory where a folder
+    goes, anything that is not a readable regular file, or a file the owner wrote."""
+    found = playbook_skills.obstacle(base, path)
+    if found is None and (path.exists() or path.is_symlink()) and not generated_skill(path):
+        found = path
+    return found
+
+
+def reconcile(writes, removals):
+    """Plan each physical file once. Providers whose configuration folders are aliased (for example
+    `~/.claude/skills` linked to `~/.codex/skills`) reach one file through two paths: the first provider that writes
+    it decides its content, and nothing that any provider writes is removed through another provider's path."""
+    unique, written = {}, set()
+    for path, data in writes.items():
+        if (key := playbook_skills.physical(path)) not in written:
+            written.add(key)
+            unique[path] = data
+    stale, seen = [], set(written)
+    for path in removals:
+        if (key := playbook_skills.physical(path)) not in seen:
+            seen.add(key)
+            stale.append(path)
+    return unique, stale
+
+
 def disabled_note(name, reason):
     """The instructions of a profile that cannot be applied: no workflow, only what to tell the owner."""
     return (f"T3 Boat is not ready: the `{name}` profile cannot be applied because {reason}. No T3 Boat workflow, "
@@ -283,6 +327,20 @@ def plan(name, state=None, warn=None, loaded=None):
             state, reason = None, ("its attached playbook cannot be read; the container log and "
                                    "`docker exec t3-boat t3-boat status` name the file")
     enabled = PROVIDERS[name]
+    if state is not None:
+        # The Boat skill holds the workflow the lead is told to follow; a file the owner put at its path is kept,
+        # and the profile stays unapplied until it is moved, so the lead is never sent to text t3-boat did not write.
+        for provider, base, _ in targets(home):
+            path = boat_skill_path(base)
+            if provider in enabled and (found := skill_occupant(base, path)) is not None:
+                message = (f"{found} is not a Boat skill t3-boat generated, so it is kept and the {name} profile is "
+                           f"not applied; move it away from {path}, then restart the container or rerun setup")
+                if warn is None:
+                    raise ProfileError(message)
+                warn(message)
+                state, reason = None, ("a file t3-boat did not generate occupies the path of its Boat skill; the "
+                                       "container log and `docker exec t3-boat t3-boat status` name the file")
+                break
     path = settings_path(home)
     try:
         settings = json.loads(read_owned(path, "{}"))
@@ -312,15 +370,12 @@ def plan(name, state=None, warn=None, loaded=None):
     front, body = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip().split("\n---\n", 1)
     base_skill = f"{front}\n---\n\n{SKILL_MARK}\n{body}"
     generic = (ROOT / "skills/t3-boat/generic.md").read_text().rstrip()
-    for provider, base, filename in targets(home):
+    # Enabled providers first: where two providers' files are one file through a link, the enabled one's text wins.
+    for provider, base, filename in sorted(targets(home), key=lambda row: row[0] not in enabled):
         target = base / filename
-        skill_path = base / "skills/t3-boat/SKILL.md"
-        if state is None or provider not in enabled:
-            try:
-                if SKILL_MARK in playbook.read_regular(skill_path).decode("utf-8", errors="replace"):
-                    removals.append(skill_path)
-            except OSError:
-                pass
+        skill_path = boat_skill_path(base)
+        if (state is None or provider not in enabled) and generated_skill(skill_path):
+            removals.append(skill_path)
         if state is None and provider in enabled:
             writes[target] = instructions(target, disabled_note(name, reason))
         elif state is not None and provider in enabled:
@@ -359,6 +414,7 @@ def plan(name, state=None, warn=None, loaded=None):
         roles = {role: playbook_skills.worker_guide(package, role) for role in package.roles} if package else None
         writes[record] = json.dumps({"profile": state, "playbook": package and {
             "name": package.name, "label": package.label(where=False), "roles": roles}}, indent=2) + "\n"
+    writes, removals = reconcile(writes, removals)
     for found in kept:
         notices.append(f"kept your own {found}; it has no t3-boat marker, so it is used in place of the "
                        "playbook's guide")
