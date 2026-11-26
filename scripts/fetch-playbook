@@ -3,7 +3,7 @@
 # The image runs this at build time, so a running installation never fetches it.
 set -eu
 repository=https://github.com/pogorelov17/agent-playbook.git
-commit=2d213fc02b6805581073bf805df7e7d9dea321d6
+commit=a27b16a7d6962df7b26fc3233b8503f973f8d715
 target=${1:?usage: fetch-playbook DIRECTORY}
 if [ "$(cat "$target/.commit" 2>/dev/null)" = "$commit" ]; then
   exit 0

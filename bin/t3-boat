@@ -224,6 +224,7 @@ def choose_playbook(providers):
     print(f"Agent playbook {playbook.commit()[:12]}: role guides and skills for the team lead and every worker role "
           f"({', '.join(playbook.roles())}).")
     print("If you install them, they apply to every project on this machine. Nothing is added to your repositories.")
+    print("The team lead then follows its guide from its first response, including ordinary discussion.")
     for provider in providers:
         print(f"  {provider}: {Path(homes[provider]) / 'skills' / (playbook_skills.PREFIX + 'ROLE') / 'SKILL.md'}")
     print("Each Boat worker VM also receives its own role's guide in its provider instruction file "
