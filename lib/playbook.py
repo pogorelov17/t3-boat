@@ -73,6 +73,15 @@ def read_regular(path, limit=-1):
         return handle.read(limit)
 
 
+def _unique_members(pairs):
+    members = {}
+    for key, value in pairs:
+        if key in members:
+            raise ValueError(f"duplicate JSON member {ascii(key)}")
+        members[key] = value
+    return members
+
+
 def _entries(value):
     return [value] if isinstance(value, dict) else value
 
@@ -96,7 +105,7 @@ class Package:
             raise PlaybookError(f"{path}: {error}") from None
         if not directory:
             raise PlaybookError(f"{path} is not a directory")
-        self.manifest_path = self.root / "team.json"
+        self.manifest_path = self.base / "team.json"
         for _ in range(READS):
             self._read = {}
             self._parse()
@@ -148,7 +157,7 @@ class Package:
     def _json(self, path):
         text = self._text(path)  # Its own errors already name the file.
         try:
-            data = json.loads(text)
+            data = json.loads(text, object_pairs_hook=_unique_members)
             # JSON escapes can decode to a lone surrogate even when the source file is valid UTF-8.
             json.dumps(data, ensure_ascii=False).encode("utf-8")
             return data
@@ -209,7 +218,7 @@ class Package:
         version = data.get("version")
         self.version = version if isinstance(version, str) and TEXT.fullmatch(version) else None
         try:
-            commit = read_regular(self.root / ".commit", 128).decode("ascii", errors="replace").strip()
+            commit = read_regular(self.base / ".commit", 128).decode("ascii", errors="replace").strip()
         except (OSError, ValueError):
             commit = ""
         self.commit = commit if re.fullmatch(r"[0-9a-f]{7,64}", commit) else None

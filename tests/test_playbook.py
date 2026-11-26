@@ -30,6 +30,33 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(package.summary("qa_bot"), "You are the qa_bot.")
         self.assertIn("version 7.1.0", package.label())
 
+    def test_switching_package_link_does_not_mix_releases(self):
+        first = write_package(self.root, name="first")
+        second = write_package(self.root.parent / "second", name="second")
+        (second / "common/report.md").write_text("SECOND-REPORT")
+        active = self.root.parent / "active"
+        active.symlink_to(first)
+        replacement = self.root.parent / "replacement"
+        replacement.symlink_to(second)
+        parse = playbook.Package._parse
+
+        def switch_then_parse(package):
+            replacement.replace(active)
+            parse(package)
+
+        with unittest.mock.patch.object(playbook.Package, "_parse", switch_then_parse):
+            loaded = playbook.load(active)
+        self.assertEqual(loaded.name, "first")
+        self.assertIn("COMMON-REPORT", loaded.bundle("rigger"))
+        self.assertEqual(playbook.load(active).name, "second")
+
+    def test_duplicate_json_members_cannot_hide_an_invalid_value(self):
+        write_package(self.root)
+        manifest = self.root / "team.json"
+        manifest.write_text('{"name":' + json.dumps(chr(0xd800)) + ',' + manifest.read_text().lstrip()[1:])
+        with self.assertRaisesRegex(playbook.PlaybookError, "team.json: duplicate JSON member 'name'"):
+            playbook.load(self.root)
+
     def test_model_sets_are_read_as_data_and_filtered_by_provider(self):
         package = playbook.load(write_package(self.root))
         self.assertEqual(package.fitting_sets(("codex",)), ["codex-crew"])
