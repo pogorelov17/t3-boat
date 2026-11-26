@@ -34,7 +34,8 @@ def skill_path(base, role):
 def description(role):
     """When a provider should load the guide: the role's rows, its own summary and what the guide holds."""
     rows = " or ".join(f"`{key}`" for key in playbook.keys(role))
-    use = ("Load before you clarify, plan, brief workers or report a delivery as the T3 Boat team lead (`lead`)."
+    use = ("Load before your first response as the T3 Boat team lead (`lead`), including ordinary discussion, and "
+           "follow it for the whole conversation; not when a task assigns you another role."
            if role == "lead" else f"Load when a task assigns you the {role} role (profile row {rows}).")
     return (f"agent-playbook {role} role guide: who the {role} is, what it receives and delivers, its rules and "
             f"report format, with its skills. {use} {playbook.summary(role)}").strip()
@@ -101,14 +102,17 @@ def remove(paths):
 
 
 def lead_note(base, installed):
-    """The sentence pointing the team lead to its own guide, or an empty string.
+    """The sentences telling the team lead to follow its own guide from its first response, or an empty string.
 
-    `installed` holds the guide files this run writes or keeps for the owner; a blocked path is never in it.
+    `installed` holds the guide files this run writes or keeps for the owner; a blocked path is never in it,
+    and without the owner's opt-in nothing is, so the lead is never sent to a guide that is not there.
     """
     path = skill_path(base, "lead")
     if path not in installed:
         return ""
-    return (f" Before you plan or delegate, also load and follow your agent-playbook role guide at {path}; "
+    return (f" As the team lead, load and follow your agent-playbook role guide at {path} before your first "
+            "response, including ordinary discussion and questions, and keep following it for the whole "
+            "conversation. When your task assigns you another role, follow that role's guide instead of this one; "
             "every worker started with boat-worker receives its own role guide.")
 
 
