@@ -162,6 +162,22 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(own.read_text(), "my own guide\n")
         self.assertIn("## Workers and briefs", self.skill("codex"))
 
+    def test_symlinked_role_directory_is_occupied_during_attach_refresh_and_detach(self):
+        role = self.home / ".codex/skills" / playbook.skill_name("harbor-crew", "rigger")
+        role.parent.mkdir(parents=True)
+        target = self.home / "owner-directory"
+        target.mkdir()
+        role.symlink_to(target, target_is_directory=True)
+        save(self.home, "codex-only", {"path": str(self.package), "model_set": None, "lead_role": "rigger"})
+        for _ in range(2):
+            self.serve("codex-only")
+            self.assertIn("| rigger | 3 | not installed |", self.skill("codex"))
+            self.assertEqual(list(target.iterdir()), [])
+        save(self.home, "codex-only", None)
+        self.serve("codex-only")
+        self.assertTrue(role.is_symlink())
+        self.assertEqual(list(target.iterdir()), [])
+
     def test_owner_file_at_a_guide_path_is_kept_and_a_blocked_path_is_not_named(self):
         skills = self.home / ".codex/skills"
         master = skills / playbook.skill_name("harbor-crew", "harbor-master")

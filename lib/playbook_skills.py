@@ -50,6 +50,8 @@ def generated(path):
 def obstacle(base, path):
     """The path that keeps a guide from being written or read: a non-directory where a folder goes, or
     something other than a readable file at the guide's own path. None when nothing is in the way."""
+    if path.parent.is_symlink() or path.is_symlink():
+        return path.parent if path.parent.is_symlink() else path
     for folder in (Path(base) / "skills", path.parent):
         if (folder.exists() or folder.is_symlink()) and not folder.is_dir():
             return folder
