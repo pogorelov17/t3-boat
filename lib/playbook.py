@@ -108,13 +108,15 @@ class Package:
         self.manifest_path = self.base / "team.json"
         for _ in range(READS):
             self._read = {}
+            self._paths = {}
             self._parse()
-            if all(self._bytes(path, again=True) == data for path, data in self._read.items()):
+            if (all(self._bytes(path, again=True) == data for path, data in self._read.items())
+                    and all(self._resolve(rel) == path for rel, path in list(self._paths.items()))):
                 break
         else:
             raise PlaybookError(f"{self.manifest_path}: the package kept changing while it was read; "
                                 "finish editing it and try again")
-        del self._read
+        del self._read, self._paths
 
     # Reading. Every file is read once per attempt, then read again to confirm nothing changed in between.
 
@@ -166,24 +168,32 @@ class Package:
         except (ValueError, RecursionError) as error:
             raise PlaybookError(f"{path}: {error if isinstance(error, ValueError) else 'nested too deeply'}") from None
 
-    def _file(self, rel):
-        """Resolve a manifest path to a regular file inside the package; anything else names the manifest."""
+    def _resolve(self, rel):
+        """Pin each package-relative path to a target inside the resolved release directory."""
         try:
             path = (self.base / rel).resolve() if isinstance(rel, str) and rel and not rel.startswith("/") else None
             inside = path is not None and self.base in path.parents
-            regular = inside and path.is_file()
         except (OSError, ValueError, RuntimeError) as error:
             raise PlaybookError(f"{self.manifest_path}: path {rel!r} cannot be resolved: "
                                 f"{getattr(error, 'strerror', None) or error}") from None
         if not inside:
             raise PlaybookError(f"{self.manifest_path}: path {rel!r} is outside the package")
+        self._paths.setdefault(rel, path)
+        return path
+
+    def _file(self, rel):
+        path = self._resolve(rel)
+        try:
+            regular = path.is_file()
+        except OSError as error:
+            raise PlaybookError(f"{self.manifest_path}: {rel!r}: {error.strerror}") from None
         if not regular:
             raise PlaybookError(f"{self.manifest_path}: {rel} is not a file in the package")
         return path
 
     def _parse(self):
         manifest_path = self.manifest_path
-        data = self._json(manifest_path)
+        data = self._json(self._resolve("team.json"))
         if not isinstance(data, dict) or data.get("schema") != 1:
             raise PlaybookError(f"{manifest_path}: expected a schema 1 team description")
         roles = data.get("roles")
@@ -217,8 +227,9 @@ class Package:
                 raise PlaybookError(f"{manifest_path}: roles {other!r} and {role!r} share a skill name; rename one")
         version = data.get("version")
         self.version = version if isinstance(version, str) and TEXT.fullmatch(version) else None
+        commit_path = self._resolve(".commit")
         try:
-            commit = read_regular(self.base / ".commit", 128).decode("ascii", errors="replace").strip()
+            commit = read_regular(commit_path, 128).decode("ascii", errors="replace").strip()
         except (OSError, ValueError):
             commit = ""
         self.commit = commit if re.fullmatch(r"[0-9a-f]{7,64}", commit) else None

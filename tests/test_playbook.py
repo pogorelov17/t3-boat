@@ -50,6 +50,37 @@ class PackageTests(unittest.TestCase):
         self.assertIn("COMMON-REPORT", loaded.bundle("rigger"))
         self.assertEqual(playbook.load(active).name, "second")
 
+    def test_metadata_links_cannot_cross_the_pinned_release(self):
+        first = write_package(self.root, name="first")
+        second = write_package(self.root.parent / "second", name="second")
+        pointer = self.root.parent / "active"
+        for filename in ("team.json", ".commit"):
+            with self.subTest(filename=filename):
+                pointer.symlink_to(first)
+                original = first / filename
+                if filename == ".commit":
+                    original.write_text("a" * 40)
+                    (second / filename).write_text("b" * 40)
+                target = original.with_suffix(".metadata")
+                original.rename(target)
+                (second / filename).rename(second / target.name)
+                original.symlink_to(pointer / target.name)
+                replace = self.root.parent / "next"
+                replace.symlink_to(second)
+                parse = playbook.Package._parse
+
+                def switch_then_parse(package):
+                    replace.replace(pointer)
+                    parse(package)
+
+                with unittest.mock.patch.object(playbook.Package, "_parse", switch_then_parse):
+                    with self.assertRaisesRegex(playbook.PlaybookError, "outside the package"):
+                        playbook.load(pointer)
+                original.unlink()
+                target.rename(original)
+                (second / target.name).rename(second / filename)
+                pointer.unlink()
+
     def test_duplicate_json_members_cannot_hide_an_invalid_value(self):
         write_package(self.root)
         manifest = self.root / "team.json"
