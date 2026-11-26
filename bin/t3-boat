@@ -215,9 +215,10 @@ def describe(attachment):
 
 
 def choose_lead_role(package, current):
-    """Ask which of the package's roles the T3 team lead follows, if any."""
+    """Ask which of the package's roles the T3 team lead follows, if any. Only an earlier choice is a default:
+    no role name means anything to T3 Boat."""
     roles = list(package.roles)
-    default = next((role for role in (current, playbook.OWNER_ROLE) if role in roles), None)
+    default = current if current in roles else None
     print(f"Roles of {package.name}: " + ", ".join(f"{n}. {role}" for n, role in enumerate(roles, start=1)))
     while True:
         reply = input("Role the T3 team lead follows ('none' for no role)"
@@ -233,7 +234,8 @@ def choose_lead_role(package, current):
 
 
 def choose_model_set(profile, package, current):
-    """Ask which of the package's model sets assigns this profile's models; None when it declares none that fits."""
+    """Ask which of the package's model sets assigns this profile's models, or None ('none', or none fits).
+    Only an earlier choice is a default: no set name means anything to T3 Boat."""
     if not package.model_set_paths:
         print(f"{package.name} declares no model sets; the team lead chooses each worker's model.")
         return None
@@ -244,17 +246,20 @@ def choose_model_set(profile, package, current):
     if not fitting:
         print(f"No model set of {package.name} fits {profile}; the team lead chooses each worker's model.")
         return None
-    default = next((name for name in (current, profile) if name in fitting), fitting[0] if len(fitting) == 1 else None)
+    default = current if current in fitting else None
     print(f"Model sets of {package.name} for {profile}:")
     for number, name in enumerate(fitting, start=1):
         print(f"  {number}. {name}")
     while True:
-        reply = input(f"Model set [{default}]: " if default else "Model set: ").strip()
+        reply = input("Model set ('none' to let the team lead choose each worker's model)"
+                      + (f" [{default}]: " if default else ": ")).strip()
+        if reply.lower() == "none":
+            return None
         chosen = default if not reply else next(
             (name for number, name in enumerate(fitting, start=1) if reply in (name, str(number))), None)
         if chosen:
             return chosen
-        print("Select a listed model set by number or name.")
+        print("Select a listed model set by number or name, or 'none'.")
 
 
 def choose_playbook(profile, current):
@@ -275,7 +280,7 @@ def choose_playbook(profile, current):
     choices = "Enter to keep it, 'none' to detach" if current else "Enter for none"
     if bundled:
         choices += f", 'bundled' for {bundled.label()}"
-    choices += ", or the absolute path of a package directory in the container (for example under /data)"
+    choices += ", or the absolute path of a package directory in the container (for example under /data/teams)"
     print(choices + ".")
     while True:
         reply = input("Playbook: ").strip()
@@ -441,7 +446,7 @@ def status(profile, providers):
     if failures:
         print("Next: docker exec -it t3-boat t3-boat setup")
         return 1
-    print("Setup verified. Push and pull-request permissions are exercised on your first change.")
+    print("Setup verified. Repository write access is first used when a worker delivers a change.")
     return 0
 
 
@@ -463,6 +468,8 @@ def main():
             sys.stderr.write(result.stderr)
             sys.exit(result.returncode)
         sys.stderr.write(result.stderr)
+        # Where the README copies an owner's own playbook package: `docker cp` needs the parent directory.
+        (Path.home() / "teams").mkdir(exist_ok=True)
         os.chdir(Path.home())
         os.execvp("t3", ["t3", "--no-browser", "--host", "0.0.0.0", "--port", "3773"])
     if args.command == "setup":

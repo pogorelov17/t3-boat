@@ -80,7 +80,9 @@ def configure(profile, attachment):
     """Pick the lead model for `profile` and save it together with the playbook `attachment` (or None)."""
     if profile not in PROVIDERS:
         raise ValueError(f"Unknown profile {profile!r}")
-    package, model_set, lead_role = check_attachment(profile, attachment)
+    # Read the package once: the suggestion below and every file generated from this choice come from this read.
+    loaded = check_attachment(profile, attachment)
+    package, model_set, lead_role = loaded
     discovered = catalog(profile)
     available = {
         provider: {model: efforts for model, efforts in discovered.get(provider, {}).items() if efforts}
@@ -112,7 +114,7 @@ def configure(profile, attachment):
         hint = ", or 'refresh' for the playbook's suggestion" if suggested and suggested != row else ""
         action = input(f"Enter to accept, 'edit' to change it{hint}: ").strip().lower()
         if not action:
-            prepare(profile, {PARENT: row, "playbook": attachment})
+            prepare(profile, {PARENT: row, "playbook": attachment}, loaded=loaded)
             return row
         if action == "refresh" and hint:
             row = dict(suggested)

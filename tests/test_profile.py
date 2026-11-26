@@ -106,7 +106,8 @@ class ProfileTests(unittest.TestCase):
             for role in CUSTOM_ROLES:
                 guide = playbook_skills.skill_path(base, package, role)
                 text = guide.read_text()
-                self.assertIn(f"name: harbor-crew-{playbook.slug(role)}\n", text)
+                self.assertIn(f"name: {playbook.skill_name('harbor-crew', role)}\n", text)
+                self.assertTrue(guide.parent.name.startswith(f"playbook-harbor-crew-{playbook.slug(role)}-"))
                 self.assertTrue(text.endswith(package.bundle(role)))
                 self.assertIn(playbook_skills.MARK, text)
             skill = self.skill(provider)
@@ -136,43 +137,147 @@ class ProfileTests(unittest.TestCase):
         save(self.home, "codex-only", {"path": str(self.package), "model_set": "codex-crew", "lead_role": None})
         self.serve("codex-only")
         skills = self.home / ".codex/skills"
-        extra = skills / "harbor-crew-rigger/notes.md"
+        package = playbook.load(str(self.package))
+        rigger = playbook.skill_name(package.name, "rigger")
+        qa_bot = playbook.skill_name(package.name, "qa_bot")
+        extra = skills / rigger / "notes.md"
         extra.write_text("mine\n")
-        own = skills / "harbor-crew-qa-bot/SKILL.md"
+        own = skills / qa_bot / "SKILL.md"
         own.write_text("my own guide\n")
         save(self.home, "codex-only", None)
         self.serve("codex-only")
         self.assertEqual(sorted(p.relative_to(skills).as_posix() for p in skills.rglob("*") if p.is_file()),
-                         ["harbor-crew-qa-bot/SKILL.md", "harbor-crew-rigger/notes.md", "t3-boat/SKILL.md"])
+                         sorted([f"{qa_bot}/SKILL.md", f"{rigger}/notes.md", "t3-boat/SKILL.md"]))
         self.assertEqual(own.read_text(), "my own guide\n")
         self.assertIn("## Workers and briefs", self.skill("codex"))
 
     def test_owner_file_at_a_guide_path_is_kept_and_a_blocked_path_is_not_named(self):
         skills = self.home / ".codex/skills"
-        (skills / "harbor-crew-harbor-master").mkdir(parents=True)
-        (skills / "harbor-crew-harbor-master/SKILL.md").write_text("owner guide\n")
-        (skills / "harbor-crew-rigger").write_text("a file where a folder goes\n")
+        master = skills / playbook.skill_name("harbor-crew", "harbor-master")
+        master.mkdir(parents=True)
+        (master / "SKILL.md").write_text("owner guide\n")
+        (skills / playbook.skill_name("harbor-crew", "rigger")).write_text("a file where a folder goes\n")
         save(self.home, "codex-only", {"path": str(self.package), "model_set": None, "lead_role": "harbor-master"})
         result = self.serve("codex-only")
         self.assertIn("kept your own", result.stderr)
         self.assertIn("is not installed", result.stderr)
-        self.assertEqual((skills / "harbor-crew-harbor-master/SKILL.md").read_text(), "owner guide\n")
+        self.assertEqual((master / "SKILL.md").read_text(), "owner guide\n")
         skill = self.skill("codex")
         self.assertIn("| rigger | 3 | not installed |", skill)
         self.assertIn("harbor-master guide at", (self.home / ".codex/AGENTS.md").read_text())
 
-    def test_an_unreadable_package_leaves_the_profile_unapplied_but_t3_starts(self):
-        save(self.home, "codex-only", {"path": str(self.package), "model_set": None, "lead_role": None})
-        self.serve("codex-only")
-        (self.package / "team.json").unlink()
-        result = self.serve("codex-only")
-        self.assertIn("team.json is missing. T3 starts without the codex-only profile", result.stderr)
+    def assert_disabled(self, profile, message):
+        """T3 starts with only the note that names the problem: no Boat skill, guides, model or applied record."""
         settings = json.loads((self.home / ".t3/userdata/settings.json").read_text())
         self.assertNotIn("defaultModelSelection", settings)
+        for provider in boat_profile.PROVIDERS[profile]:
+            base = self.home / BASES[provider]
+            note = (base / FILES[provider]).read_text()
+            self.assertIn("T3 Boat is not ready", note)
+            self.assertIn(message, note)
+            self.assertNotIn("skills/", note)
+            self.assertEqual([p for p in (base / "skills").rglob("*") if p.is_file()] if (base / "skills").exists()
+                             else [], [])
+        self.assertFalse(boat_profile.applied_path(profile).exists())
+        with self.assertRaisesRegex(playbook.PlaybookError, message):
+            boat_profile.applied(profile)
+
+    def test_an_unreadable_package_leaves_the_profile_unapplied_but_t3_starts(self):
+        save(self.home, "codex+claude", {"path": str(self.package), "model_set": "both-providers",
+                                         "lead_role": "harbor-master"})
+        self.serve("codex+claude")
+        self.assertTrue(boat_profile.applied("codex+claude"))
+        (self.package / "team.json").unlink()
+        result = self.serve("codex+claude")
+        self.assertIn("team.json is missing. T3 starts without the codex+claude profile", result.stderr)
+        self.assert_disabled("codex+claude", "team.json is missing")
+
+    def test_every_unreadable_package_file_is_found_before_anything_is_generated_and_restoring_it_recovers(self):
+        save(self.home, "codex+claude", {"path": str(self.package), "model_set": "both-providers",
+                                         "lead_role": "harbor-master"})
+        self.serve("codex+claude")
+        applied = self.files()
+        rules = self.package / "crew/qa_bot/ROLE.md"  # The last role's guide, so earlier guides read fine.
+        original = rules.read_bytes()
+        damage = {
+            "not UTF-8": (lambda: rules.write_bytes(b"# qa_bot\n\xff\xfe broken\n"), "not UTF-8 text"),
+            "permission": (lambda: rules.chmod(0), "Permission denied"),
+            "model set": (lambda: (self.package / "assignments/both-providers.json").write_text(json.dumps(
+                {"roles": {"rigger": {"provider": ["codex"], "family": "luna", "effort": "low"}}})), "provider"),
+            "deep": (lambda: (self.package / "assignments/codex-crew.json").write_text("[" * 100000),
+                     "nested too deeply"),
+        }
+        for label, (corrupt, message) in damage.items():
+            if label == "permission" and os.geteuid() == 0:
+                continue  # Root reads every file.
+            with self.subTest(label):
+                corrupt()
+                result = self.serve("codex+claude")
+                self.assertIn(message, result.stderr)
+                self.assertIn("T3 starts without the codex+claude profile", result.stderr)
+                self.assert_disabled("codex+claude", message)
+                rules.chmod(0o644)
+                rules.write_bytes(original)
+                write_package(self.package)
+                self.serve("codex+claude")
+                # The same files as before the damage; T3's settings may list their keys in another order.
+                recovered = self.files()
+                settings = self.home / ".t3/userdata/settings.json"
+                self.assertEqual(json.loads(recovered.pop(settings)), json.loads(applied[settings]))
+                self.assertEqual(recovered, {path: data for path, data in applied.items() if path != settings})
+                self.assertTrue(boat_profile.applied("codex+claude"))
+
+    def test_a_fresh_volume_has_only_the_note_to_run_setup(self):
+        self.serve("codex+claude")
+        for provider in boat_profile.OPTION:
+            self.assertIn("setup has not saved it yet", (self.home / BASES[provider] / FILES[provider]).read_text())
+        self.assertFalse((self.home / ".codex/skills").exists())
+
+    def test_a_provider_the_profile_no_longer_enables_loses_its_boat_skill_and_note(self):
+        save(self.home, "codex+claude")
+        self.serve("codex+claude")
+        save(self.home, "claude-only")
+        self.serve("claude-only")
+        self.assertFalse((self.home / ".codex/skills/t3-boat").exists())
         self.assertNotIn(boat_profile.BEGIN, (self.home / ".codex/AGENTS.md").read_text())
-        self.assertFalse(list((self.home / ".codex/skills").glob("harbor-crew-*")))
-        with self.assertRaisesRegex(playbook.PlaybookError, "team.json is missing"):
-            boat_profile.applied("codex-only")
+        self.assertIn(boat_profile.SKILL_MARK, self.skill("claudeAgent"))
+
+    def test_package_and_role_names_cannot_take_the_boat_skill_or_each_others_names(self):
+        package = write_package(self.home / "teams/t3", name="t3", roles={"boat": 1, "qa_bot": 1, "QA-bot": 2}, sets={})
+        save(self.home, "codex-only", {"path": str(package), "model_set": None, "lead_role": "boat"})
+        self.serve("codex-only")
+        self.assertIn("# Boat project workflow", self.skill("codex"))
+        names = sorted(p.parent.name for p in (self.home / ".codex/skills").glob("*/SKILL.md"))
+        self.assertEqual(len(names), 4)
+        self.assertEqual(names[-1], "t3-boat")
+        self.assertTrue(all(name.startswith("playbook-t3-") for name in names[:-1]), names)
+        loaded = playbook.load(str(package))
+        for role in loaded.roles:
+            guide = playbook_skills.skill_path(self.home / ".codex", loaded, role)
+            self.assertTrue(guide.read_text().endswith(loaded.bundle(role)))
+
+    def test_workers_get_the_package_as_applied_until_the_next_start(self):
+        save(self.home, "codex-only", {"path": str(self.package), "model_set": None, "lead_role": "harbor-master"})
+        self.serve("codex-only")
+        steps = self.package / "crew/rigger/how/steps.md"
+        steps.write_text("EDITED-STEPS\n")
+        state, applied = boat_profile.read_applied("codex-only")
+        self.assertIn("STEPS-rigger", applied["roles"]["rigger"])  # What the lead's skills were made from.
+        self.assertFalse(boat_profile.applied("codex-only"))  # Status reports the edit as not applied yet.
+        self.serve("codex-only")
+        self.assertIn("EDITED-STEPS", boat_profile.read_applied("codex-only")[1]["roles"]["rigger"])
+        guide = playbook_skills.skill_path(self.home / ".codex", playbook.load(str(self.package)), "rigger")
+        self.assertIn("EDITED-STEPS", guide.read_text())
+
+    def test_workers_are_refused_until_the_saved_choice_is_applied(self):
+        save(self.home, "codex-only")
+        with self.assertRaisesRegex(boat_profile.ProfileError, "not applied"):
+            boat_profile.read_applied("codex-only")
+        self.serve("codex-only")
+        self.assertIsNone(boat_profile.read_applied("codex-only")[1])
+        save(self.home, "codex-only", lead=dict(LEADS["codex-only"], effort="low"))  # Saved, not yet applied.
+        with self.assertRaisesRegex(boat_profile.ProfileError, "not applied"):
+            boat_profile.read_applied("codex-only")
 
     def test_an_invalid_profile_stops_before_any_change_and_names_the_file(self):
         save(self.home, "claude-only")
@@ -228,9 +333,28 @@ class ProfileTests(unittest.TestCase):
             boat_profile.prepare("codex-only", {"lead": LEADS["codex-only"], "playbook": attachment})
         self.assertEqual(written, [self.home / "profiles/codex-only.json"])  # The whole choice, in one write.
         self.assertFalse(boat_profile.applied("codex-only"))
+        with self.assertRaisesRegex(boat_profile.ProfileError, "not applied"):
+            boat_profile.read_applied("codex-only")  # No worker starts from the half-written choice.
         self.serve("codex-only")
         self.assertTrue(boat_profile.applied("codex-only"))
         self.assertIn("## Attached playbook", self.skill("codex"))
+
+    def test_an_unreadable_generated_file_is_replaced_and_an_unreadable_owner_file_is_named(self):
+        save(self.home, "codex-only")
+        self.serve("codex-only")
+        if os.geteuid() == 0:
+            self.skipTest("root reads every file")
+        skill = self.home / ".codex/skills/t3-boat/SKILL.md"
+        skill.chmod(0)
+        self.serve("codex-only")
+        self.assertIn("# Boat project workflow", skill.read_text())
+        settings = self.home / ".t3/userdata/settings.json"
+        settings.chmod(0)
+        self.addCleanup(settings.chmod, 0o600)
+        result = self.serve("codex-only", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"{settings}: cannot be read: Permission denied", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_codex_override_on_the_server_is_refused(self):
         save(self.home, "codex-only")

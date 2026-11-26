@@ -10,6 +10,12 @@ A profile file, `profiles/PROFILE.json`, holds everything setup chose for that T
 the optional external package attached in setup: its directory, the model set chosen for this profile, and the
 package role whose guide the T3 team lead follows. Setup writes the file in one atomic step, and every generated
 file (T3 settings, instructions, skills) is derived from it, so a container start can always regenerate them.
+
+The package is read once per run, in full, and everything is generated from that one read. The last file written,
+`profiles/PROFILE.applied.json`, records the saved choice it was generated from and each role's worker guide, so
+`boat-worker` starts workers from exactly what the team lead's skills describe, even after the owner edits the
+package directory. A profile that cannot be applied, because setup has not run or the package cannot be read,
+leaves T3 starting with a short note in place of the instructions, and no Boat skill, guides or applied record.
 """
 import fcntl
 import json
@@ -33,6 +39,8 @@ OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
 MISSING = object()  # A saved profile that does not exist, as opposed to one holding JSON null.
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
+# The first line after the front matter of the generated Boat skill; only a file carrying it is ever removed.
+SKILL_MARK = "<!-- t3-boat: generated from the T3 Boat profile. t3-boat replaces and removes this file. -->"
 VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:_/-]*")
 
 
@@ -41,16 +49,33 @@ class ProfileError(ValueError):
 
 
 def write(target, content):
+    """Replace `target` with `content` in one step; a generated file that cannot be read is simply replaced."""
     data = content.encode()
-    if target.exists() and target.read_bytes() == data:
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=target.parent, delete=False) as temporary:
-        temporary.write(data)
     try:
-        os.replace(temporary.name, target)
-    finally:
-        Path(temporary.name).unlink(missing_ok=True)
+        if target.read_bytes() == data:
+            return
+    except OSError:
+        pass
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=target.parent, delete=False) as temporary:
+            temporary.write(data)
+        try:
+            os.replace(temporary.name, target)
+        finally:
+            Path(temporary.name).unlink(missing_ok=True)
+    except OSError as error:
+        raise ProfileError(f"{target}: cannot be written: {error.strerror or error}") from None
+
+
+def read_owned(path, default=""):
+    """The text of a file the owner may also edit, or `default` when there is none; errors name the file."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return default
+    except (OSError, UnicodeDecodeError) as error:
+        raise ProfileError(f"{path}: cannot be read: {getattr(error, 'strerror', None) or error}") from None
 
 
 def check_profile_name(name):
@@ -75,6 +100,10 @@ def check_row(name, row):
         if not isinstance(row[key], str) or not VALUE.fullmatch(row[key]):
             raise ProfileError(f"invalid lead {key}")
     return row
+
+
+def applied_path(name, home=None):
+    return Path(home or Path.home()) / "profiles" / (name + ".applied.json")
 
 
 def check_attachment(name, attachment):
@@ -160,8 +189,24 @@ def read_profile(name):
     return (state, *check_attachment(name, state.get("playbook")))
 
 
+def read_applied(name):
+    """The saved profile and what the last complete run generated from it, without reading the package again.
+
+    Returns (state, playbook), where playbook is None or {"name", "label", "roles": {role: worker guide}}. Call
+    it under state_lock. A profile whose generated files are missing or from another choice is refused.
+    """
+    state = read_state(name)
+    if state is MISSING:
+        raise ProfileError("Select a model with t3-boat setup first")
+    record = saved(applied_path(name), missing=None)
+    if not isinstance(record, dict) or record.get("profile") != state or "playbook" not in record:
+        raise ProfileError(f"the {name} profile is not applied, so no worker can start. The container log and "
+                           "t3-boat status name the reason; fix it, then restart the container or rerun t3-boat setup")
+    return state, record["playbook"]
+
+
 def instructions(path, content):
-    previous = path.read_text() if path.exists() else ""
+    previous = read_owned(path)
     if previous.count(BEGIN) != previous.count(END) or previous.count(BEGIN) > 1:
         raise ProfileError(f"Repair the t3-boat marker block in {path}")
     block = f"{BEGIN}\n{content}\n{END}" if content else ""
@@ -193,34 +238,45 @@ def settings_path(home):
     return Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
 
 
-def plan(name, state=None, warn=None):
+def disabled_note(name, reason):
+    """The instructions of a profile that cannot be applied: no workflow, only what to tell the owner."""
+    return (f"T3 Boat is not ready: the `{name}` profile cannot be applied because {reason}. No T3 Boat workflow, "
+            "skill or playbook is active. Do not inspect, edit, build, test, install or run any project on this "
+            "server, and do not start Boat workers. Tell the owner this note, and that "
+            "`docker exec -it t3-boat t3-boat setup` (or restoring the named file and restarting the container) "
+            "fixes it. Planning conversation is fine.")
+
+
+def plan(name, state=None, warn=None, loaded=None):
     """Compute every file generated for profile `name` from `state` (by default, the saved one).
 
-    Returns (writes, removals, notices). Nothing is written. A saved package that cannot be read is reported
-    through `warn` and leaves the profile unapplied, so T3 still starts and setup can attach it again.
+    Returns (writes, removals, notices). Nothing is written. `loaded` is the (package, model set, lead role) that
+    check_attachment already returned for `state`, so the package is read only once. A saved package that cannot be
+    read is reported through `warn` and leaves the profile unapplied, so T3 still starts and setup can attach it
+    again.
     """
     check_profile_name(name)
     home = Path.home()
     notices = []
     package = model_set = lead_role = None
+    reason = "setup has not saved it yet"
     if state is None:
         state = read_state(name, missing=None)
     if state is not None:
         check_state(name, state)
         try:
-            package, model_set, lead_role = check_attachment(name, state.get("playbook"))
+            package, model_set, lead_role = loaded or check_attachment(name, state.get("playbook"))
         except playbook.PlaybookError as error:
             if warn is None:
                 raise
             warn(f"{error}. T3 starts without the {name} profile until the playbook is restored or setup "
                  "attaches another one")
-            state = None
+            state, reason = None, f"its attached playbook cannot be read ({error})"
     enabled = PROVIDERS[name]
     path = settings_path(home)
-    raw = path.read_bytes() if path.exists() else b"{}"
     try:
-        settings = json.loads(raw.decode())
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        settings = json.loads(read_owned(path, "{}"))
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise ProfileError(f"{path}: {exc}") from None
     if not isinstance(settings, dict):
         raise ProfileError(f"{path}: expected a JSON object")
@@ -243,15 +299,24 @@ def plan(name, state=None, warn=None):
         {p: base for p, base, _ in targets(home)}, enabled, package, lead_role)
     writes = dict(skill_files)
     installed = set(skill_files) | set(kept)  # Only guide files that will exist; a blocked path is never named.
-    base_skill = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip()
+    front, body = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip().split("\n---\n", 1)
+    base_skill = f"{front}\n---\n\n{SKILL_MARK}\n{body}"
     generic = (ROOT / "skills/t3-boat/generic.md").read_text().rstrip()
     for provider, base, filename in targets(home):
         target = base / filename
-        if state is not None and provider in enabled:
+        skill_path = base / "skills/t3-boat/SKILL.md"
+        if state is None or provider not in enabled:
+            try:
+                if SKILL_MARK in skill_path.read_text(encoding="utf-8", errors="replace"):
+                    removals.append(skill_path)
+            except OSError:
+                pass
+        if state is None and provider in enabled:
+            writes[target] = instructions(target, disabled_note(name, reason))
+        elif state is not None and provider in enabled:
             override = base / "AGENTS.override.md"
             if provider == "codex" and override.is_file() and override.stat().st_size:
                 raise ProfileError(f"{override} masks the required global profile")
-            skill_path = base / "skills/t3-boat/SKILL.md"
             lead = state[PARENT]
             sections = [base_skill,
                         playbook_skills.section(base, package, model_set, lead_role, installed).rstrip() if package else generic,
@@ -276,6 +341,14 @@ def plan(name, state=None, warn=None):
     writes[path] = json.dumps(settings, indent=2) + "\n"
     # A provider's child shell may omit custom environment variables.
     writes[home / "profiles/active"] = name + "\n"
+    record = applied_path(name, home)
+    if state is None:
+        if record.exists() or record.is_symlink():
+            removals.insert(0, record)  # Removed first, so no worker starts from the earlier choice.
+    else:
+        roles = {role: playbook_skills.worker_guide(package, role) for role in package.roles} if package else None
+        writes[record] = json.dumps({"profile": state, "playbook": package and {
+            "name": package.name, "label": package.label(where=False), "roles": roles}}, indent=2) + "\n"
     for found in kept:
         notices.append(f"kept your own {found}; it has no t3-boat marker, so it is used in place of the "
                        "playbook's guide")
@@ -291,26 +364,34 @@ def applied(name):
     return not removals and all(p.is_file() and p.read_bytes() == data.encode() for p, data in writes.items())
 
 
-def prepare(name, state=None):
+def prepare(name, state=None, loaded=None):
     """Write the saved choices (when setup passes `state`) and regenerate every file derived from them.
 
-    The profile file is written first, in one atomic step: it is the whole choice. The generated files follow;
-    if that is interrupted, the next container start or setup regenerates them, and t3-boat status reports the
-    profile as not applied until then.
+    The profile file is written first, in one atomic step: it is the whole choice. The generated files follow,
+    and the applied record last; if that is interrupted, the next container start or setup regenerates them, and
+    until then t3-boat status reports the profile as not applied and boat-worker refuses to start a worker.
+    `loaded` is what check_attachment returned for `state`, when the caller already read the package.
     """
     check_profile_name(name)
     home = Path.home()
     with state_lock(home):
         if state is not None:
             check_state(name, state)
-            check_attachment(name, state.get("playbook"))
-        writes, removals, notices = plan(name, state, warn=None if state else
+            loaded = loaded or check_attachment(name, state.get("playbook"))
+        writes, removals, notices = plan(name, state, loaded=loaded, warn=None if state else
                                          lambda message: print(f"T3 Boat: {message}.", file=sys.stderr))
+        record = applied_path(name, home)
+        if record in removals:
+            removals.remove(record)
+            record.unlink(missing_ok=True)
+        last = writes.pop(record, None)
         if state is not None:
             write(profile_path(name, home), json.dumps(state, indent=2) + "\n")
         for path, data in writes.items():
             write(path, data)
         playbook_skills.remove(removals)
+        if last is not None:
+            write(record, last)
     for notice in notices:
         print(f"T3 Boat: {notice}.", file=sys.stderr)
 

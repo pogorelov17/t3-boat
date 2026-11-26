@@ -20,7 +20,7 @@ flowchart TB
 
     subgraph VM["Worker VM"]
         D["Worker follows the brief<br/>on its own checkout"]:::work
-        R["Returns a result:<br/>report, tests, SHA, draft PR"]:::work
+        R["Returns a result:<br/>what the brief asked for"]:::work
         D --> R
     end
 
@@ -45,9 +45,9 @@ Coordinate coding agents across your GitHub projects from one Linux machine, loc
 Suppose you ask in T3, “Fix the failing test and show me why it broke.”
 
 1. **The team lead talks with you in T3.** It discusses, plans and checks a fact on the web when needed. New chats in all your projects inherit your installation’s lead model and reasoning level. While you are still discussing an idea, the conversation stays in T3 until there is work for a worker.
-2. **Workers run on Boat.** The lead starts a worker on a disposable VM and gives it a brief it writes for this task: here, reproduce the failure, fix it, run the tests and open a draft PR. Everything that touches the repository runs there: reading source, edits, installs, builds, tests and extended research. Your machine only hosts T3 and its history. The lead decides how many workers to use and what each does.
-3. **The parent chat stays compact.** For each delegation, result and decision, the lead posts who asked whom for what, known dependencies, the result and what it decided, with links to the child chat and the PR instead of shell logs. It reports what it observed; T3 shows a child’s link and the result it returns, not its live progress.
-4. **You decide when to merge.** Once a worker’s result is recorded, its VM is deleted. You can come back to the chat or ask for another change on the PR without keeping workers running.
+2. **Workers run on Boat.** The lead starts a worker on a disposable VM and gives it a brief it writes for this task: here, reproduce the failure, fix it, run the tests and deliver the fix the way you asked, for example as a pull request. What a worker delivers, and in what form, comes from its brief or from an [attached playbook](#optional-playbook); T3 Boat sets no branch, pull request or review rule of its own. Everything that touches the repository runs there: reading source, edits, installs, builds, tests and extended research. Your machine only hosts T3 and its history. The lead decides how many workers to use and what each does.
+3. **The parent chat stays compact.** For each delegation, result and decision, the lead posts who asked whom for what, known dependencies, the result and what it decided, with links to the child chat and what it delivered instead of shell logs. It reports what it observed, in the same form with or without a playbook; T3 shows a child’s link and the result it returns, not its live progress.
+4. **You decide what happens next.** Once a worker’s result is recorded, its VM is deleted. You can come back to the chat or ask for another change without keeping workers running.
 
 Prefer a fixed team? [Attach a playbook](#optional-playbook): an external package such as [agent-playbook](https://github.com/pogorelov17/agent-playbook), or your own, that defines the roles, their instructions, how many of each run and on which models. T3 Boat only launches its workers.
 
@@ -138,9 +138,9 @@ If you are unsure where to begin, ask the team lead for ideas. Wait for a reply 
 
 ## Build your first feature
 
-1. **Choose the repository for this change.** Use the URL of any GitHub repository you can work on. For a brand-new project, initializing the repository with a README gives the first PR a base commit.
-2. **Attach the repository.** If you supplied its URL during setup, continue to step 3. Otherwise rerun `docker exec -it t3-boat t3-boat setup` and enter the URL. Setup checks access from a fresh VM. The first real change exercises branch push and draft PR creation.
-3. **Continue the conversation.** Use your project chat. If you began in **Start here**, attaching the first repository keeps your planning thread there. When you are ready, ask for the first change you want. A worker implements it on Boat, checks the result, and opens a draft PR. The parent chat records the worker’s model, test results and the PR’s head SHA. With a playbook attached, its roles decide what happens next, such as reviews on separate VMs. GitHub shows the draft PR and any checks configured by that repository. You decide when to merge.
+1. **Choose the repository for this change.** Use the URL of any GitHub repository you can work on. For a brand-new project, initializing the repository with a README gives it a first commit to build on.
+2. **Attach the repository.** If you supplied its URL during setup, continue to step 3. Otherwise rerun `docker exec -it t3-boat t3-boat setup` and enter the URL. Setup checks read access from a fresh VM; write access is first used when a worker delivers a change.
+3. **Continue the conversation.** Use your project chat. If you began in **Start here**, attaching the first repository keeps your planning thread there. When you are ready, ask for the first change you want and say how you want it delivered, for example as a pull request. A worker implements it on Boat, checks the result and delivers it as its brief says. The parent chat records the worker’s model, test results and the identifiers of what it delivered. With a playbook attached, its roles decide what happens next, such as reviews on separate VMs.
 
 To work on another repository, rerun setup with its URL. To inspect current local logins, Boat configuration and the timestamp of the last successful VM check, run `docker exec t3-boat t3-boat status`. Status does not allocate a VM. Rerun setup for a fresh check after changing profiles, credentials or models.
 
@@ -159,19 +159,20 @@ A playbook is an external package of role instructions in the format of [agent-p
 When setup asks for a playbook, enter:
 
 - **Enter** for none, or to keep the one already attached, and `none` to detach it;
-- `bundled` for the copy of agent-playbook built into the image, pinned to commit `a27b16a7d696`;
-- or the absolute path of any package directory inside the container. To use your own, copy it into the volume, for example `docker cp ./my-team t3-boat:/data/teams/my-team`, and enter `/data/teams/my-team`.
+- the absolute path of any package directory inside the container. To use your own, copy it into the volume, for example `docker cp ./my-team t3-boat:/data/teams/my-team`, and enter `/data/teams/my-team`. Every container start creates `/data/teams` for this;
+- `bundled`, only in an image [built with a bundled playbook](#build-a-customized-image), for its copy of agent-playbook. The published image contains no playbook.
 
-Setup checks the manifest and every file it names, then asks two questions:
+Setup reads the manifest and every file it names in full and checks them before anything is generated: each file must be UTF-8 text of at most 1 MiB, each role’s instructions together at most 1 MiB, and the package at most 8 MiB. A malformed file is named. Setup then asks two questions, and preselects only your earlier answer:
 
-1. **Which role the T3 team lead follows.** agent-playbook calls its owner-facing role `lead`, so that is the default when a package has one; otherwise choose a role, or `none` to have the lead brief each role itself.
-2. **Which model set applies.** Setup lists the package’s model sets that use only providers this profile enables, and suggests the one named like the profile.
+1. **Which role the T3 team lead follows.** Choose any role, or `none` to have the lead brief each role itself. No role name is special.
+2. **Which model set applies.** Setup lists the package’s model sets that use only providers this profile enables. Choose one, or `none` to let the lead pick each worker’s model.
 
 Then, for every project on this machine:
 
-- Every role’s instructions become a skill for each enabled provider, named after the package and the role, in `/data/.codex/skills/` and `/data/.claude/skills/`. Nothing is added to your repositories. The team lead is told to load and follow the guide of the role you chose from its first response, and its Boat skill lists every role with its instance count, guide and the selected model assignment, quoted from the package together with its model rules.
+- Every role’s instructions become a skill for each enabled provider in `/data/.codex/skills/` and `/data/.claude/skills/`, named `playbook-PACKAGE-ROLE-ID`. The `playbook-` prefix keeps any package and role names apart from T3 Boat’s own `t3-boat` skill, and the short ID keeps roles such as `qa_bot` and `QA-bot` apart. Nothing is added to your repositories. The team lead is told to load and follow the guide of the role you chose from its first response, and its Boat skill lists every role with its instance count, guide and the selected model assignment, quoted from the package together with its model rules.
 - `boat-worker start ROLE` starts a worker for any role of the package. Its VM receives that role’s instructions in its provider’s global instruction file (`~/.codex/AGENTS.md` for Codex, `~/.claude/CLAUDE.md` for Claude) before it does anything. `boat-worker start` without a role starts a worker that has only the lead’s brief and a short worker note. Codex reads a non-empty `~/.codex/AGENTS.override.md` instead of `AGENTS.md`; if the Boat environment provides one, the instructions are appended to it after its own text.
-- The package directory is read again at every container start and worker start, so edits to your own package apply after `docker restart t3-boat`. If the package can no longer be read, T3 still starts, without the profile, and the container log and `t3-boat status` name the file; rerun setup to attach it again or detach it.
+- The package is read once at every container start and setup. Workers receive the guides from that same read, so the lead’s skills and its workers always agree. Edits to your own package apply after `docker restart t3-boat`; until then `t3-boat status` reports the profile as not applied.
+- If the package can no longer be read, for example a file is missing, unreadable or malformed, T3 still starts, without the profile: the lead’s instruction file holds only a note naming the file, the Boat skill and the playbook guides are removed, and `boat-worker start` refuses to start a worker. The container log and `t3-boat status` name the file. Restore it and restart the container, or rerun setup to attach another package or detach it.
 
 Setup writes only skill files it generated itself, which carry a `t3-boat: generated from an attached playbook` line. A file you created at the same path is never replaced and is used as that role’s guide. If something else occupies the path, that guide is not installed, the team lead is not pointed to it, and setup and the container log say so. Files you add to a skill folder stay there. Detaching the playbook removes the generated skills.
 
@@ -193,7 +194,13 @@ To change the packaged tools or workflow instructions, build from your edited so
 docker build -t t3-boat:local .
 ```
 
-The build fetches agent-playbook at the commit named in `scripts/fetch-playbook`, validates it with the package’s own checker and stores it as the `bundled` choice. To bundle another commit, change `commit` there and rebuild. Any other package can be attached from the volume without rebuilding. To run the unit tests from a checkout, run `python3 -m unittest discover -s tests`; to include the checks against the bundled package, first fetch it with `sh scripts/fetch-playbook playbook`.
+The default build contains no playbook and never fetches one. To bundle agent-playbook as the `bundled` setup choice, build with `--build-arg BUNDLE_PLAYBOOK=1`: the build then fetches the commit named in `scripts/fetch-playbook`, validates it with the package’s own checker and stores it in the image. To bundle another commit, change `commit` there. Any package can instead be attached from the volume without rebuilding.
+
+```sh
+docker build --build-arg BUNDLE_PLAYBOOK=1 -t t3-boat:local .
+```
+
+To run the unit tests from a checkout, run `python3 -m unittest discover -s tests`; to include the checks against agent-playbook itself, first fetch it with `sh scripts/fetch-playbook playbook`. `bash tests/smoke-image.sh IMAGE generic` checks a default image and `bash tests/smoke-image.sh IMAGE bundled` one built with the bundled playbook.
 
 </details>
 

@@ -15,11 +15,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import playbook_skills
-from boat_profile import PARENT, PROVIDERS, OPTION, read_profile, state_lock
+from boat_profile import MISSING, PARENT, PROVIDERS, OPTION, ProfileError, read_applied, read_state, state_lock
+
+# The remote command that runs a setup script read from standard input. The script itself never travels in an
+# argument, so a long role guide cannot exceed the argument size limit here or on the VM.
+RUN_STDIN = "sh -c " + shlex.quote('umask 077; script=$(mktemp) || exit 1; cat > "$script" && sh "$script"; '
+                                   'status=$?; rm -f "$script"; exit "$status"')
 
 
-def output(*args):
-    return subprocess.check_output(args, text=True).strip()
+def output(*args, stdin=None):
+    return subprocess.check_output(args, text=True, input=stdin).strip()
 
 
 def subscription_check(provider):
@@ -46,13 +51,12 @@ claude auth status 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.st
 
 
 # Instructions for a worker started without a playbook role: the lead's brief decides its job.
-WORKER_NOTE = """You are a worker on a disposable Boat VM, started by the T3 team lead. Your brief from the lead is your task; it decides what you do and what you deliver.
+WORKER_NOTE = f"""You are a worker on a disposable Boat VM, started by the T3 team lead. Your brief from the lead is your task; it decides what you do, what you deliver and in what form.
 
 - Do all source inspection, edits, project commands, tests, dependency installs, builds and clones here on this VM. If the brief names a repository, verify that a local checkout's origin matches it before using it, or clone it here.
-- Put code changes on a task branch and open a draft pull request through the project's authorized GitHub integration. Never push to the target branch.
+- Publish nothing the brief does not ask for. If it leaves the form of delivery open, keep your changes on this VM and describe them in your result.
 - You may split your work further only when the brief allows it and your tools support it. Name in your result what you handed on, to whom, and what came back.
-- End with a compact result for the lead: what you did, the commands you ran with pass or fail, the branch, exact commit SHA and pull request URL when there are any, open questions, and what is unverified. Report only what you observed. Link to details instead of pasting long logs.
-- Keep credentials, tokens and account details out of your result."""
+- End with a compact result for the lead. {playbook_skills.REPORTING} Link to details instead of pasting long logs."""
 
 
 def worker_instructions(provider, guide):
@@ -112,12 +116,12 @@ nohup "$HOME/t3-worker-runtime/node_modules/.bin/t3" --no-browser --host 127.0.0
 """
 
 
-def link(vm, lead, guide, providers):
-    def remote(command):
-        return output("boat", "ssh", vm, command)
+def link(vm, script):
+    def remote(command, stdin=None):
+        return output("boat", "ssh", vm, command, stdin=stdin)
 
     try:
-        remote("sh -c " + shlex.quote(bootstrap(lead, guide, providers)))
+        remote(RUN_STDIN, stdin=script)
     except subprocess.CalledProcessError as error:  # The command holds the whole bootstrap script.
         raise RuntimeError(f"Worker setup on {vm} failed with exit status {error.returncode}; "
                            "see the message above") from None
@@ -246,7 +250,10 @@ def probe_rows(lead, profile):
 def verify(environment, slug=None):
     profile = os.environ["T3_BOAT_PROFILE"]
     with state_lock():
-        lead = read_profile(profile)[0][PARENT]
+        state = read_state(profile)  # The check covers the lead model; the attached playbook plays no part.
+    if state is MISSING:
+        raise ProfileError("Select a model with t3-boat setup first")
+    lead = state[PARENT]
     if slug and not re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", slug):
         raise ValueError("Expected a GitHub owner/repository")
     vm = provision("t3-check-" + uuid.uuid4().hex[:12], environment)
@@ -295,29 +302,31 @@ def worker_plan(role=None):
     """What a worker receives: (lead model row, enabled providers, label, instructions).
 
     Without `role` the worker gets WORKER_NOTE and the lead's brief. With `role`, which must be a role of the
-    attached playbook, it gets that role's guide instead. The profile and the package are read together under
-    the state lock, so they come from one saved choice even while setup writes a new one.
+    attached playbook, it gets that role's guide instead. Both come from the record of the last complete profile
+    run, read under the state lock, so a worker receives exactly the package contents the team lead's skills were
+    generated from, even while setup writes a new choice or the owner edits the package directory.
     """
     home = Path.home()
     with state_lock(home):
         profile = os.environ.get("T3_BOAT_PROFILE") or (home / "profiles/active").read_text().strip()
-        state, package, _, _ = read_profile(profile)
-        lead = state[PARENT]
-        if role is None:
-            return lead, PROVIDERS[profile], "a worker", WORKER_NOTE
-        if package is None:
-            raise ValueError("No playbook is attached, so workers have no roles. Run boat-worker start without a "
-                             "role, or attach a playbook with t3-boat setup")
-        if role not in package.roles:
-            raise ValueError(f"{role!r} is not a role of the attached playbook {package.name}. Its roles: "
-                             + ", ".join(package.roles))
-        return lead, PROVIDERS[profile], f"the {package.name} {role} role", playbook_skills.worker_guide(package, role)
+        state, package = read_applied(profile)
+    lead = state[PARENT]
+    if role is None:
+        return lead, PROVIDERS[profile], "a worker", WORKER_NOTE
+    if package is None:
+        raise ValueError("No playbook is attached, so workers have no roles. Run boat-worker start without a "
+                         "role, or attach a playbook with t3-boat setup")
+    if role not in package["roles"]:
+        raise ValueError(f"{role!r} is not a role of the attached playbook {package['name']}. Its roles: "
+                         + ", ".join(package["roles"]))
+    return lead, PROVIDERS[profile], f"the {package['name']} {role} role", package["roles"][role]
 
 
 def start(role=None):
     """Start a worker, optionally for a role of the attached playbook (see worker_plan)."""
     # The state is read once, under its lock; provisioning runs without it, so setup is never kept waiting.
     lead, providers, label, note = worker_plan(role)
+    script = bootstrap(lead, note, providers)  # Built before any VM exists, so a problem here costs none.
     # Only provision from a configured project stub; nothing on the host fetches origin.
     binding = subprocess.run(["git", "config", "--local", "--get", "boat.environment"],
                              text=True, capture_output=True)
@@ -329,7 +338,7 @@ def start(role=None):
     vm = provision(name, environment)
     print(f"Boat ID: {vm}", flush=True)
     try:
-        link(vm, lead, note, providers)
+        link(vm, script)
         if role:
             print(f"Installed the {label} guide on {vm}", flush=True)
     except BaseException:

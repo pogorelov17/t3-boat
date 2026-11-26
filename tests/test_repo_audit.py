@@ -32,10 +32,34 @@ class AuditTests(unittest.TestCase):
     def test_only_the_generic_workflow_and_the_shared_skill_ship_as_instructions(self):
         self.assertEqual(sorted(p.name for p in (ROOT / "skills/t3-boat").iterdir()), ["SKILL.md", "generic.md"])
 
-    def test_the_lead_role_name_is_only_a_setup_suggestion(self):
-        # agent-playbook's schema calls its owner-facing role `lead`; setup only suggests it as the default.
-        uses = [path.relative_to(ROOT).as_posix() for path in SHIPPED if "OWNER_ROLE" in path.read_text()]
-        self.assertEqual(sorted(uses), ["bin/t3-boat", "lib/playbook.py"])
+    def test_no_role_or_model_set_name_is_special(self):
+        # No package role (such as agent-playbook's `lead`) or set name is a default; setup asks for each.
+        for path in SHIPPED:
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotIn("OWNER_ROLE", path.read_text())
+                self.assertEqual(re.findall(r"""["'](?:lead|owner)["']\s*(?:\)|,|in\b)""",
+                                            path.read_text()) if path.suffix == ".py" else [], [])
+
+    def test_generic_instructions_set_no_branch_pull_request_or_merge_rule(self):
+        # What a worker delivers, and how, comes from the brief or an attached package.
+        worker = (ROOT / "bin/boat-worker").read_text()
+        texts = {
+            "SKILL.md": (ROOT / "skills/t3-boat/SKILL.md").read_text(),
+            "generic.md": (ROOT / "skills/t3-boat/generic.md").read_text(),
+            "WORKER_NOTE": worker[worker.index("WORKER_NOTE ="):worker.index("def worker_instructions")],
+            "playbook_skills": (ROOT / "lib/playbook_skills.py").read_text(),
+            "boat_profile": (ROOT / "lib/boat_profile.py").read_text(),
+        }
+        rule = re.compile(r"(?i)(draft|pull request|\bPR\b|task branch|target branch|head branch|\bpush|merge)")
+        for label, text in texts.items():
+            with self.subTest(label):
+                self.assertEqual(rule.findall(text), [])
+
+    def test_the_default_image_build_never_fetches_a_playbook(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        step = next(block for block in dockerfile.split("\n\n") if "fetch-playbook" in block)
+        self.assertIn('if [ "$BUNDLE_PLAYBOOK" = 1 ]; then', step)
+        self.assertIn("ARG BUNDLE_PLAYBOOK=0", step)
 
 
 if __name__ == "__main__":

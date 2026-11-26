@@ -8,17 +8,13 @@ import json
 import os
 from pathlib import Path
 
-from playbook import slug
+from playbook import skill_name
 
 MARK = "<!-- t3-boat: generated from an attached playbook"
 
 
-def skill_name(package, role):
-    return slug(package.name) + "-" + slug(role)
-
-
 def skill_path(base, package, role):
-    return Path(base) / "skills" / skill_name(package, role) / "SKILL.md"
+    return Path(base) / "skills" / skill_name(package.name, role) / "SKILL.md"
 
 
 def description(package, role, lead_role):
@@ -31,7 +27,7 @@ def description(package, role, lead_role):
 
 
 def skill_text(package, role, lead_role):
-    return (f"---\nname: {skill_name(package, role)}\ndescription: {json.dumps(description(package, role, lead_role))}\n---\n\n"
+    return (f"---\nname: {skill_name(package.name, role)}\ndescription: {json.dumps(description(package, role, lead_role))}\n---\n\n"
             f"{MARK} {package.label()}. t3-boat replaces this file; delete this line to keep your edits. -->\n\n"
             + package.bundle(role))
 
@@ -116,7 +112,8 @@ def section(base, package, model_set, lead_role, installed):
         f"The owner attached the playbook {package.label()}. Its guides decide the workflow: which roles take part, "
         "what each one receives and delivers, how many instances run, in what order and on which models. This skill "
         "only says how to run them on Boat. Where the playbook and this skill differ, follow the playbook, except for "
-        "the machine boundary and the control plane above.", "",
+        "the machine boundary, the control plane, the parent updates and the cleanup above, which hold in every "
+        "mode.", "",
         (f"You, the T3 team lead, follow the `{lead_role}` guide." if lead_role else
          "Setup assigned you none of these roles: you are the team lead and brief each role's worker yourself."), "",
         "Start a worker for a role with `boat-worker start ROLE`: its VM receives that role's guide in its provider's "
@@ -150,8 +147,15 @@ def section(base, package, model_set, lead_role, installed):
     return "\n".join(lines) + "\n"
 
 
+# Every worker reports the same way, with or without a playbook role, and whatever its guide says.
+REPORTING = ("Your result for the lead states only what you observed: what you did, the commands you ran with pass "
+             "or fail, the identifiers of anything you produced or published, open questions and what is "
+             "unverified. Keep credentials, tokens and account details out of it.")
+
+
 def worker_guide(package, role):
     """The instruction text a worker VM receives for one of the package's roles."""
     return (f"You are a worker on a disposable Boat VM. The T3 team lead started you for the `{role}` role of the "
-            f"playbook {package.label(where=False)}. Your role guide follows; follow it and the lead's brief for this whole task. "
-            f"Do all project work here, on this VM.\n\n{package.bundle(role)}")
+            f"playbook {package.label(where=False)}. Your role guide follows; follow it and the lead's brief for "
+            "this whole task. The brief and the guide decide what you deliver and how. Do all project work here, "
+            f"on this VM. {REPORTING}\n\n{package.bundle(role)}")

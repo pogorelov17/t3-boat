@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,8 +65,10 @@ class PackageTests(unittest.TestCase):
             "zero instances": dict(manifest, roles={"a": {"instances": 0, "bundle": ["common/report.md"]}}),
             "bool instances": dict(manifest, roles={"a": {"instances": True, "bundle": ["common/report.md"]}}),
             "spaced name": dict(manifest, roles={"first mate": {"instances": 1, "bundle": ["common/report.md"]}}),
-            "same skill name": dict(manifest, roles={"qa_bot": {"instances": 1, "bundle": ["common/report.md"]},
-                                                     "QA-bot": {"instances": 1, "bundle": ["common/report.md"]}}),
+            "null byte": dict(manifest, roles={"a": {"instances": 1, "bundle": ["common/\u0000.md"]}}),
+            "long path": dict(manifest, roles={"a": {"instances": 1, "bundle": ["x" * 5000]}}),
+            "directory": dict(manifest, roles={"a": {"instances": 1, "bundle": ["common"]}}),
+            "sets": dict(manifest, model_sets={"a": ["x"]}),
             "outside": dict(manifest, roles={"a": {"instances": 1, "bundle": ["../secret.md"]}}),
             "absolute": dict(manifest, roles={"a": {"instances": 1, "bundle": ["/etc/passwd"]}}),
             "absent file": dict(manifest, roles={"a": {"instances": 1, "bundle": ["nope.md"]}}),
@@ -88,9 +91,103 @@ class PackageTests(unittest.TestCase):
 
     def test_malformed_model_set_names_its_file(self):
         write_package(self.root)
-        (self.root / "assignments/codex-crew.json").write_text(json.dumps({"roles": {"rigger": {"provider": "x"}}}))
-        with self.assertRaisesRegex(playbook.PlaybookError, "codex-crew.json"):
+        entry = {"provider": "codex", "family": "luna", "effort": "low"}
+        broken = {
+            "provider": {"roles": {"rigger": {"provider": "x"}}},
+            "provider list": {"roles": {"rigger": dict(entry, provider=["codex"])}},
+            "provider object": {"roles": {"rigger": [dict(entry, provider={"codex": 1})]}},
+            "family number": {"roles": {"rigger": dict(entry, family=6)}},
+            "exceptions": {"roles": {"rigger": entry}, "exceptions": {"rigger": 1}},
+            "no roles": {"roles": []},
+        }
+        for label, data in broken.items():
+            with self.subTest(label):
+                (self.root / "assignments/codex-crew.json").write_text(json.dumps(data))
+                with self.assertRaisesRegex(playbook.PlaybookError, "codex-crew.json"):
+                    playbook.load(str(self.root))
+
+    def test_every_file_is_read_as_utf8_text_when_the_package_is_loaded(self):
+        write_package(self.root)
+        cases = {
+            "team.json": b'{"schema": 1, "name": "\xff"}',
+            "crew/cartographer/how/steps.md": b"STEPS \xc3\x28\n",
+            "assignments/codex-crew.json": b'{"roles": {"rigger": {"provider": "codex", "family": "\xfe"}}}',
+        }
+        for rel, data in cases.items():
+            with self.subTest(rel):
+                write_package(self.root)
+                (self.root / rel).write_bytes(data)
+                with self.assertRaisesRegex(playbook.PlaybookError, f"{rel}: not UTF-8 text"):
+                    playbook.load(str(self.root))
+
+    def test_unreadable_and_deeply_nested_files_are_named(self):
+        write_package(self.root)
+        (self.root / "assignments/codex-crew.json").write_text("[" * 100000)
+        with self.assertRaisesRegex(playbook.PlaybookError, "codex-crew.json: nested too deeply"):
             playbook.load(str(self.root))
+        write_package(self.root)
+        if os.geteuid() != 0:
+            (self.root / "common/report.md").chmod(0)
+            with self.assertRaisesRegex(playbook.PlaybookError, "report.md: cannot be read: Permission denied"):
+                playbook.load(str(self.root))
+
+    def test_size_limits_are_checked_when_the_package_is_read(self):
+        write_package(self.root, roles={"long": 1}, sets={})
+        # A long guide that is still within the limits loads in full.
+        (self.root / "crew/long/ROLE.md").write_text("# long\n" + "x" * 71690 + "\n")
+        self.assertGreater(len(playbook.load(str(self.root)).bundle("long").encode()), 71698)
+        (self.root / "crew/long/ROLE.md").write_text("x" * (playbook.MAX_FILE + 1))
+        with self.assertRaisesRegex(playbook.PlaybookError, "ROLE.md: larger than 1048576 bytes"):
+            playbook.load(str(self.root))
+        half = "y" * (playbook.MAX_FILE // 2 + 1)
+        (self.root / "crew/long/ROLE.md").write_text(half)
+        (self.root / "crew/long/how/steps.md").write_text(half)
+        with self.assertRaisesRegex(playbook.PlaybookError, "the long guide is [0-9]+ bytes, over the 1048576-byte"):
+            playbook.load(str(self.root))
+
+    def test_any_valid_role_names_get_distinct_skill_names_outside_the_boat_skill(self):
+        package = playbook.load(write_package(self.root, name="t3", roles={"boat": 1, "qa_bot": 1, "QA-bot": 1,
+                                                                            "Q.A.bot": 1}, sets={}))
+        names = [playbook.skill_name(package.name, role) for role in package.roles]
+        self.assertEqual(len(set(names)), 4)
+        self.assertNotIn("t3-boat", names)
+        long = playbook.skill_name("p" * 64, "R" * 64)
+        for name in (*names, long):
+            self.assertRegex(name, r"^playbook-[a-z0-9]+(-[a-z0-9]+)*$")
+            self.assertLessEqual(len(name), 64)
+
+    def test_a_package_edited_while_it_is_read_is_read_again(self):
+        write_package(self.root)
+        original = playbook.Package._parse
+        steps = self.root / "crew/rigger/how/steps.md"
+        edits = []
+
+        def parse_then_edit(package):
+            original(package)
+            if len(edits) < 1:  # The owner saves a file while T3 Boat reads the package.
+                edits.append(1)
+                steps.write_text("EDITED\n")
+
+        with unittest.mock.patch.object(playbook.Package, "_parse", parse_then_edit):
+            package = playbook.load(str(self.root))
+        self.assertIn("EDITED", package.bundle("rigger"))
+
+        def always_edit(package):
+            original(package)
+            steps.write_text(steps.read_text() + "more\n")
+
+        with unittest.mock.patch.object(playbook.Package, "_parse", always_edit), \
+                self.assertRaisesRegex(playbook.PlaybookError, "kept changing while it was read"):
+            playbook.load(str(self.root))
+
+    def test_the_loaded_package_does_not_read_its_files_again(self):
+        package = playbook.load(write_package(self.root))
+        bundle = package.bundle("rigger")
+        (self.root / "crew/rigger/ROLE.md").unlink()
+        (self.root / "assignments/codex-crew.json").write_text("{")
+        self.assertEqual(package.bundle("rigger"), bundle)
+        self.assertEqual(package.summary("rigger"), "You are the rigger.")
+        self.assertEqual(package.entry("codex-crew", "rigger")["family"], "luna")
 
 
 BUNDLED = Path(os.environ.get("T3_BOAT_PLAYBOOK") or playbook.BUNDLED)

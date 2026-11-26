@@ -1,16 +1,78 @@
 #!/usr/bin/env bash
 # Exercise the release image on an isolated Docker daemon, without accounts.
+#
+# KIND is `generic` for the default image, which must contain no playbook, or `bundled` for an image built with
+# BUNDLE_PLAYBOOK=1. Every kind runs a clean installation without a playbook and installations with a package
+# attached from the volume, copied in from the host exactly as the README describes; `bundled` also attaches the
+# built-in agent-playbook.
 set -euo pipefail
 # shellcheck source=tests/smoke-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/smoke-lib.sh"
-image=${1:?Usage: smoke-image.sh IMAGE}
+image=${1:?Usage: smoke-image.sh IMAGE generic|bundled}
+kind=${2:?Usage: smoke-image.sh IMAGE generic|bundled}
+[[ $kind == generic || $kind == bundled ]] || { echo "KIND must be generic or bundled" >&2; exit 2; }
 container=
 volume=
+host_dir=$(mktemp -d)
 cleanup() {
   if [[ -n "$container" ]]; then docker rm -f "$container" >/dev/null; fi
   if [[ -n "$volume" ]]; then docker volume rm "$volume" >/dev/null; fi
 }
-trap cleanup EXIT
+trap 'cleanup; rm -rf "$host_dir"' EXIT
+
+# The image contains a playbook exactly when it was built to bundle one.
+if docker run --rm --network none --entrypoint test "$image" -e /opt/t3-boat/playbook; then
+  [[ $kind == bundled ]] || { echo "The generic image contains /opt/t3-boat/playbook" >&2; exit 1; }
+else
+  [[ $kind == generic ]] || { echo "The bundled image lacks /opt/t3-boat/playbook" >&2; exit 1; }
+fi
+
+# Write a package to $host_dir/NAME the way an owner would before `docker cp`.
+crew_package() {  # Roles harbor-master x1, rigger x3, qa_bot x2; model sets duo and claude-solo.
+  local team=$host_dir/crew
+  for role in harbor-master rigger qa_bot; do
+    mkdir -p "$team/people/$role"
+    printf '# %s\n\n## Who you are\n\nYou are the %s.\n\nINSTRUCTIONS-FOR-%s\n' "$role" "$role" "$role" > "$team/people/$role/ROLE.md"
+  done
+  printf 'Shared house rules.\n' > "$team/house-rules.md"
+  mkdir -p "$team/sets"
+  cat > "$team/team.json" <<'JSON'
+{"schema": 1, "name": "harbor-crew", "version": "0.0.1",
+ "roles": {
+   "harbor-master": {"instances": 1, "bundle": ["people/harbor-master/ROLE.md", "house-rules.md"]},
+   "rigger": {"instances": 3, "bundle": ["people/rigger/ROLE.md", "house-rules.md"]},
+   "qa_bot": {"instances": 2, "bundle": ["people/qa_bot/ROLE.md", "house-rules.md"]}},
+ "model_rules": [{"roles": ["qa_bot"], "must_differ_from": "rigger"}],
+ "model_sets": {"duo": "sets/duo.json", "claude-solo": "sets/claude-solo.json"}}
+JSON
+  cat > "$team/sets/duo.json" <<'JSON'
+{"roles": {"harbor-master": {"provider": "claude", "family": "fable", "effort": "high"},
+           "rigger": [{"provider": "codex", "family": "luna", "effort": "low"},
+                      {"provider": "codex", "family": "sol", "effort": "medium"},
+                      {"provider": "claude", "family": "haiku", "effort": "medium"}],
+           "qa_bot": [{"provider": "claude", "family": "sonnet", "effort": "high"},
+                      {"provider": "codex", "family": "astra", "effort": "high"}]}}
+JSON
+  cat > "$team/sets/claude-solo.json" <<'JSON'
+{"roles": {"harbor-master": {"provider": "claude", "family": "opus", "effort": "high"}}}
+JSON
+}
+
+t3_package() {  # Package `t3` with role `boat`, whose plain name would be the Boat skill's own, and qa_bot / QA-bot.
+  local team=$host_dir/t3
+  mkdir -p "$team/roles" "$team/sets"
+  for role in boat qa_bot QA-bot; do
+    printf '# %s\n\nINSTRUCTIONS-FOR-%s\n' "$role" "$role" > "$team/roles/$role.md"
+  done
+  cat > "$team/team.json" <<'JSON'
+{"schema": 1, "name": "t3",
+ "roles": {"boat": {"instances": 1, "bundle": ["roles/boat.md"]},
+           "qa_bot": {"instances": 1, "bundle": ["roles/qa_bot.md"]},
+           "QA-bot": {"instances": 2, "bundle": ["roles/QA-bot.md"]}},
+ "model_sets": {"solo": "sets/solo.json"}}
+JSON
+  printf '%s\n' '{"roles": {"boat": {"provider": "claude", "family": "opus", "effort": "high"}}}' > "$team/sets/solo.json"
+}
 
 start() {
   container=$(docker run -d --network none -v "$volume:/data" -e "T3_BOAT_PROFILE=$profile" "$image")
@@ -42,41 +104,23 @@ for profile in codex-only claude-only codex+claude; do
   case "$profile" in
     # No playbook: choose the lead model by number (the provider is the only one), then accept.
     codex-only) answers=$'\n2\n3\n\n\n\n' ;;
-    # The agent-playbook copy built into the image: its lead role, the set named like the profile, its suggestion.
-    claude-only) answers=$'bundled\n\n\n\n\n\n' ;;
-    # A team that shares no role name, count or model set name with agent-playbook, attached from the volume.
+    # Every choice is explicit: the role for the team lead and the model set, then the suggested lead model.
+    claude-only)
+      if [[ $kind == bundled ]]; then
+        answers=$'bundled\nlead\nclaude-only\n\n\n\n'
+      else
+        t3_package
+        chmod -R a+rX "$host_dir/t3"
+        docker cp "$host_dir/t3" "$container:/data/teams/t3"
+        answers=$'/data/teams/t3\nboat\nsolo\n\n\n\n'
+      fi ;;
+    # A team that shares no role name, count or model set name with agent-playbook, copied in from the host
+    # with the README's exact command into the directory every container start provides.
     codex+claude)
-      answers=$'/data/teams/crew\nharbor-master\nduo\n\n\n\n'
-      docker exec -i "$container" sh -eu <<'SH'
-team=/data/teams/crew
-for role in harbor-master rigger qa_bot; do
-  mkdir -p "$team/people/$role"
-  printf '# %s\n\n## Who you are\n\nYou are the %s.\n\nINSTRUCTIONS-FOR-%s\n' "$role" "$role" "$role" > "$team/people/$role/ROLE.md"
-done
-printf 'Shared house rules.\n' > "$team/house-rules.md"
-mkdir -p "$team/sets"
-cat > "$team/team.json" <<'JSON'
-{"schema": 1, "name": "harbor-crew", "version": "0.0.1",
- "roles": {
-   "harbor-master": {"instances": 1, "bundle": ["people/harbor-master/ROLE.md", "house-rules.md"]},
-   "rigger": {"instances": 3, "bundle": ["people/rigger/ROLE.md", "house-rules.md"]},
-   "qa_bot": {"instances": 2, "bundle": ["people/qa_bot/ROLE.md", "house-rules.md"]}},
- "model_rules": [{"roles": ["qa_bot"], "must_differ_from": "rigger"}],
- "model_sets": {"duo": "sets/duo.json", "claude-solo": "sets/claude-solo.json"}}
-JSON
-cat > "$team/sets/duo.json" <<'JSON'
-{"roles": {"harbor-master": {"provider": "claude", "family": "fable", "effort": "high"},
-           "rigger": [{"provider": "codex", "family": "luna", "effort": "low"},
-                      {"provider": "codex", "family": "sol", "effort": "medium"},
-                      {"provider": "claude", "family": "haiku", "effort": "medium"}],
-           "qa_bot": [{"provider": "claude", "family": "sonnet", "effort": "high"},
-                      {"provider": "codex", "family": "astra", "effort": "high"}]}}
-JSON
-cat > "$team/sets/claude-solo.json" <<'JSON'
-{"roles": {"harbor-master": {"provider": "claude", "family": "opus", "effort": "high"}}}
-JSON
-SH
-      ;;
+      crew_package
+      chmod -R a+rX "$host_dir/crew"
+      docker cp "$host_dir/crew" "$container:/data/teams/crew"
+      answers=$'/data/teams/crew\nharbor-master\nduo\n\n\n\n' ;;
   esac
   # Exercise real setup, worker scripts and status against offline service doubles.
   docker exec -i -e "ANSWERS=$answers" "$container" sh -eu <<'SH'
@@ -138,7 +182,7 @@ PYTHON
 MOCK
 chmod +x "$auth_tools"/*
 export PATH="$auth_tools:$PATH"
-printf '%s' "$ANSWERS" | t3-boat setup
+printf '%s' "$ANSWERS" | t3-boat setup > "$HOME/setup-output"
 test ! -e "$HOME/check-vm"
 t3-boat status | grep -F 'Setup verified'
 SH
@@ -148,35 +192,62 @@ SH
   note="/data/$lead_dir/$( [[ $lead_dir == .codex ]] && echo AGENTS.md || echo CLAUDE.md )"
   docker exec "$container" jq -e 'keys == ["lead", "playbook"]' "$role_file" >/dev/null
   status=$(status_output "$container")
+  setup_output=$(docker exec "$container" cat /data/setup-output)
+  # No role or model set is preselected by its name.
+  [[ $setup_output != *"follows ('none' for no role) ["* ]] || { echo "setup preselected a role" >&2; exit 1; }
+  if [[ $kind == generic ]]; then
+    [[ $setup_output != *"'bundled'"* ]] || { echo "the generic image offered a bundled playbook" >&2; exit 1; }
+  else
+    require 't3-boat setup' "$setup_output" "'bundled' for agent-playbook"
+  fi
   case "$profile" in
     codex-only)
       docker exec "$container" jq -e '.playbook == null and .lead.model == "gpt-6.2-astra" and .lead.effort == "high"' "$role_file" >/dev/null
       docker exec "$container" grep -Fq '## Workers and briefs' "$skill"
       [[ $(docker exec "$container" ls /data/.codex/skills) == t3-boat ]]
+      # Generic instructions set no delivery form of their own.
+      generic_text=$(docker exec "$container" cat "$skill" /data/.codex/AGENTS.md)
+      [[ ! ${generic_text,,} =~ draft|pull\ request|task\ branch ]] ||
+        { echo "generic instructions name a branch or pull request rule: ${BASH_REMATCH[0]}" >&2; exit 1; }
       require 't3-boat status' "$status" 'Playbook: none'
       worker_role=
       worker_text='You are a worker on a disposable Boat VM, started by the T3 team lead.'
       ;;
     claude-only)
-      docker exec "$container" jq -e '.playbook == {"path": "/opt/t3-boat/playbook", "model_set": "claude-only", "lead_role": "lead"}' "$role_file" >/dev/null
-      # Every role the package declares is installed, named from its manifest; T3 Boat lists none of its own.
-      for role in $(docker exec "$container" jq -r '.roles | keys[]' /opt/t3-boat/playbook/team.json); do
-        docker exec "$container" grep -Fq "name: agent-playbook-$role" "/data/.claude/skills/agent-playbook-$role/SKILL.md"
-      done
-      docker exec "$container" grep -Fq '## Attached playbook' "$skill"
-      docker exec "$container" grep -Fq 'load and follow its lead guide at /data/.claude/skills/agent-playbook-lead/SKILL.md' "$note"
-      require 't3-boat status' "$status" 'Playbook: agent-playbook (version '
-      require 't3-boat status' "$status" 'commit a27b16a7d696) at /opt/t3-boat/playbook, model set claude-only, team lead follows lead'
-      worker_role=$(docker exec "$container" jq -r '.roles | keys_unsorted | map(select(. != "lead"))[0]' /opt/t3-boat/playbook/team.json)
-      worker_text=$(docker exec "$container" jq -r --arg role "$worker_role" '.roles[$role].bundle[0]' /opt/t3-boat/playbook/team.json)
-      worker_text="<!-- file: $worker_text -->"
+      if [[ $kind == bundled ]]; then
+        docker exec "$container" jq -e '.playbook == {"path": "/opt/t3-boat/playbook", "model_set": "claude-only", "lead_role": "lead"}' "$role_file" >/dev/null
+        # Every role the package declares is installed, named from its manifest; T3 Boat lists none of its own.
+        for role in $(docker exec "$container" jq -r '.roles | keys[]' /opt/t3-boat/playbook/team.json); do
+          docker exec "$container" sh -c 'grep -Fq "name: playbook-agent-playbook-$1-" /data/.claude/skills/playbook-agent-playbook-"$1"-*/SKILL.md' _ "$role"
+        done
+        docker exec "$container" grep -Fq '## Attached playbook' "$skill"
+        docker exec "$container" grep -Eq 'load and follow its lead guide at /data/.claude/skills/playbook-agent-playbook-lead-[0-9a-f]{8}/SKILL.md' "$note"
+        require 't3-boat status' "$status" 'Playbook: agent-playbook (version '
+        require 't3-boat status' "$status" 'commit a27b16a7d696) at /opt/t3-boat/playbook, model set claude-only, team lead follows lead'
+        worker_role=$(docker exec "$container" jq -r '.roles | keys_unsorted | map(select(. != "lead"))[0]' /opt/t3-boat/playbook/team.json)
+        worker_text=$(docker exec "$container" jq -r --arg role "$worker_role" '.roles[$role].bundle[0]' /opt/t3-boat/playbook/team.json)
+        worker_text="<!-- file: $worker_text -->"
+      else
+        docker exec "$container" jq -e '.playbook == {"path": "/data/teams/t3", "model_set": "solo", "lead_role": "boat"}
+          and .lead == {"provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}' "$role_file" >/dev/null
+        # The package's `boat` role cannot replace the Boat skill; qa_bot and QA-bot keep separate guides.
+        docker exec "$container" grep -Fq '# Boat project workflow' "$skill"
+        guides=$(docker exec "$container" sh -c 'ls -d /data/.claude/skills/playbook-t3-*' | wc -l)
+        [[ $guides == 3 ]] || { echo "expected 3 guides for package t3, found $guides" >&2; exit 1; }
+        docker exec "$container" sh -c 'grep -lq INSTRUCTIONS-FOR-QA-bot /data/.claude/skills/playbook-t3-qa-bot-*/SKILL.md'
+        docker exec "$container" sh -c 'grep -lq INSTRUCTIONS-FOR-qa_bot /data/.claude/skills/playbook-t3-qa-bot-*/SKILL.md'
+        docker exec "$container" grep -Eq 'load and follow its boat guide at /data/.claude/skills/playbook-t3-boat-[0-9a-f]{8}/SKILL.md' "$note"
+        require 't3-boat status' "$status" 'Playbook: t3 at /data/teams/t3, model set solo, team lead follows boat'
+        worker_role=QA-bot
+        worker_text='INSTRUCTIONS-FOR-QA-bot'
+      fi
       ;;
     codex+claude)
       docker exec "$container" jq -e '.playbook == {"path": "/data/teams/crew", "model_set": "duo", "lead_role": "harbor-master"}
         and .lead == {"provider": "claudeAgent", "model": "claude-fable-5-2", "effort": "high"}' "$role_file" >/dev/null
       for base in .codex .claude; do
         for role in harbor-master rigger qa-bot; do
-          docker exec "$container" test -f "/data/$base/skills/harbor-crew-$role/SKILL.md"
+          docker exec "$container" sh -c 'test -f "$1"/skills/playbook-harbor-crew-"$2"-*/SKILL.md' _ "/data/$base" "$role"
         done
         docker exec "$container" grep -Fq '| rigger | 3 |' "/data/$base/skills/t3-boat/SKILL.md"
         docker exec "$container" grep -Fq '| qa_bot | 2 |' "/data/$base/skills/t3-boat/SKILL.md"
@@ -188,8 +259,10 @@ SH
       worker_text='INSTRUCTIONS-FOR-qa_bot'
       ;;
   esac
+  # The machine boundary and the factual parent updates hold in every mode.
   docker exec "$container" grep -Fq '## Machine boundary' "$skill"
   docker exec "$container" grep -Fq '## Parent updates' "$skill"
+  docker exec "$container" grep -Fq 'These updates take the same form with or without a playbook' "$skill"
   provider=$(docker exec "$container" jq -er .lead.provider "$role_file")
   model=$(docker exec "$container" jq -er .lead.model "$role_file")
   # No accounts, networking or worker VM: only the transcript is under test.
@@ -207,7 +280,7 @@ cat > "$tools/boat" <<'MOCK'
 #!/bin/sh
 case "$1 $2" in
   'new --json') echo '{"event":"ready","id":"bx_worker"}' ;;
-  'ssh bx_worker') printf '%s' "$3" > "$HOME/worker-script"; exit 1 ;;
+  'ssh bx_worker') cat > "$HOME/worker-script"; exit 1 ;;
   'delete --yes') test "$3" = bx_worker && touch "$HOME/worker-deleted" ;;
   *) exit 1 ;;
 esac
@@ -217,26 +290,59 @@ cd /data/start-here
 if PATH="$tools:$PATH" boat-worker start $ROLE; then exit 1; fi
 test -e "$HOME/worker-deleted"
 grep -Fq -- "$TEXT" "$HOME/worker-script"
+grep -Fq 'Your result for the lead states only what you observed' "$HOME/worker-script"
 grep -Fq '"enabled": true' "$HOME/worker-script"
 rm "$HOME/worker-script" "$HOME/worker-deleted"
 SH
-  broken=
+  restart() {
+    docker stop "$container" >/dev/null
+    docker rm "$container" >/dev/null
+    container=
+    start
+  }
   if [[ "$profile" == codex+claude ]]; then
-    # The attached package disappears: T3 must still start, without the profile, and name the file.
-    docker exec "$container" rm /data/teams/crew/team.json
-    broken=1
-  fi
-  docker stop "$container" >/dev/null
-  docker rm "$container" >/dev/null
-  container=
-  start
-  if [[ -n "$broken" ]]; then
-    logs=$(container_logs "$container")
-    require 'docker logs' "$logs" '/data/teams/crew/team.json is missing. T3 starts without the codex+claude profile'
-    status=$(incomplete_status "$container")
-    require 't3-boat status' "$status" '[missing] Global profile codex+claude applied'
-    require 't3-boat status' "$status" '/data/teams/crew/team.json is missing'
-    docker exec "$container" jq -e '.playbook.path == "/data/teams/crew"' "$role_file" >/dev/null
+    # A package file the container user cannot read, then a missing manifest: each time T3 still starts, with
+    # only the note naming the file in place of the profile, and no Boat skill, guide or worker.
+    for damage in unreadable missing; do
+      if [[ $damage == unreadable ]]; then
+        docker exec -u 0 "$container" chmod 000 /data/teams/crew/people/qa_bot/ROLE.md
+        message='/data/teams/crew/people/qa_bot/ROLE.md: cannot be read: Permission denied'
+      else
+        docker exec "$container" rm /data/teams/crew/team.json
+        message='/data/teams/crew/team.json is missing'
+      fi
+      restart
+      logs=$(container_logs "$container")
+      require 'docker logs' "$logs" "$message. T3 starts without the codex+claude profile"
+      status=$(incomplete_status "$container")
+      require 't3-boat status' "$status" '[missing] Global profile codex+claude applied'
+      require 't3-boat status' "$status" "$message"
+      docker exec "$container" jq -e '.playbook.path == "/data/teams/crew"' "$role_file" >/dev/null
+      for base in .codex .claude; do
+        # T3 Boat's own skills only; Codex keeps its built-in ones under skills/.system.
+        left=$(docker exec "$container" sh -c 'ls -d "$1"/t3-boat "$1"/playbook-* 2>/dev/null; true' _ "/data/$base/skills")
+        [[ -z $left ]] || { echo "skills left after the package broke: $left" >&2; exit 1; }
+      done
+      for file in .codex/AGENTS.md .claude/CLAUDE.md; do
+        text=$(docker exec "$container" cat "/data/$file")
+        require "/data/$file" "$text" 'T3 Boat is not ready'
+        require "/data/$file" "$text" "$message"
+      done
+      docker exec "$container" test ! -e /data/profiles/codex+claude.applied.json
+      refused=$(docker exec -w /data/start-here "$container" boat-worker start 2>&1) && exit 1
+      require 'boat-worker start' "$refused" 'profile is not applied, so no worker can start'
+      # Restoring the file and restarting applies the profile again.
+      if [[ $damage == unreadable ]]; then
+        docker exec -u 0 "$container" chmod 644 /data/teams/crew/people/qa_bot/ROLE.md
+        restart
+        status=$(status_output "$container")
+        require 't3-boat status' "$status" '[ok] Global profile codex+claude applied'
+        docker exec "$container" grep -Fq '| qa_bot | 2 |' /data/.claude/skills/t3-boat/SKILL.md
+        docker exec "$container" test -f /data/profiles/codex+claude.applied.json
+      fi
+    done
+  else
+    restart
   fi
   [[ $(docker exec "$container" cat /data/.t3/userdata/environment-id) = "$environment" ]]
   docker exec "$container" t3 thread list --project /data/start-here --json |

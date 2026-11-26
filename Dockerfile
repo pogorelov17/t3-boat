@@ -30,10 +30,6 @@ RUN set -eu; \
 RUN --mount=type=bind,source=scripts/install-codex,target=/tmp/install-codex \
     sh /tmp/install-codex && npm cache clean --force
 
-# agent-playbook pinned to one commit: setup offers it as the optional `bundled` playbook, read offline.
-RUN --mount=type=bind,source=scripts/fetch-playbook,target=/tmp/fetch-playbook \
-    sh /tmp/fetch-playbook /opt/t3-boat/playbook && chmod -R a+rX,go-w /opt/t3-boat/playbook
-
 ENV HOME=/data \
     PATH=/opt/t3-boat/bin:/data/.local/bin:${PATH} \
     BOAT_NO_UPDATE=1 \
@@ -49,6 +45,18 @@ RUN chmod -R a+rX,go-w /opt/t3-boat/bin /opt/t3-boat/lib /opt/t3-boat/skills && 
     && ln -s /opt/t3-boat/bin/boat-worker /usr/local/bin/boat-worker \
     && ln -s /opt/t3-boat/bin/t3-boat /usr/local/bin/t3-boat \
     && ln -s /data/.local/bin/claude /usr/local/bin/claude
+
+# Optional, off by default: `--build-arg BUNDLE_PLAYBOOK=1` adds agent-playbook at the commit pinned in
+# scripts/fetch-playbook, which setup then offers as the `bundled` playbook. The default image contains no
+# playbook, and neither its build nor a running container fetches or needs one.
+ARG BUNDLE_PLAYBOOK=0
+ARG PLAYBOOK_REPOSITORY=
+RUN --mount=type=bind,source=scripts/fetch-playbook,target=/tmp/fetch-playbook \
+    case "$BUNDLE_PLAYBOOK" in 0|1) ;; *) echo 'BUNDLE_PLAYBOOK must be 0 or 1' >&2; exit 1 ;; esac; \
+    if [ "$BUNDLE_PLAYBOOK" = 1 ]; then \
+      PLAYBOOK_REPOSITORY="$PLAYBOOK_REPOSITORY" sh /tmp/fetch-playbook /opt/t3-boat/playbook \
+      && chmod -R a+rX,go-w /opt/t3-boat/playbook; \
+    fi
 USER node:node
 WORKDIR /data
 VOLUME ["/data"]

@@ -19,14 +19,21 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch the bundled agent-playbook for its tests
-        run: sh scripts/fetch-playbook playbook
-      - name: Test helpers
+      - name: Test helpers without any playbook
         run: python3 -m unittest discover -s tests -v
-      - run: docker build -t t3-boat:test .
-      - run: bash tests/smoke-image.sh t3-boat:test
+      # The default image must build without the playbook repository: its address here cannot be reached.
+      - name: Build the generic image
+        run: docker build --build-arg PLAYBOOK_REPOSITORY=https://playbook.invalid/none.git -t t3-boat:test .
+      - name: Smoke-test clean and attached installations
+        run: bash tests/smoke-image.sh t3-boat:test generic
       - name: Verify optional Claude installation
         run: docker run --rm --entrypoint sh t3-boat:test -ec 'install-claude && claude --version'
+      - name: Test helpers against agent-playbook
+        run: sh scripts/fetch-playbook playbook && python3 -m unittest discover -s tests -v
+      - name: Build and smoke-test the optional bundled image
+        run: |
+          docker build --build-arg BUNDLE_PLAYBOOK=1 -t t3-boat:bundled .
+          bash tests/smoke-image.sh t3-boat:bundled bundled
       - name: Export tested image for release
         if: startsWith(github.ref, 'refs/tags/')
         run: docker save t3-boat:test | zstd -T0 -3 -o image.tar.zst

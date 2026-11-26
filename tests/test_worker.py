@@ -11,11 +11,20 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
+import boat_profile
 import playbook
 from packages import CUSTOM_ROLES, write_package
-from test_profile import LEADS, save
+from test_profile import LEADS, save as save_profile
 
 worker = SourceFileLoader("boat_worker_tests", str(ROOT / "bin/boat-worker")).load_module()
+
+
+def save(home, profile, attachment=None, lead=None):
+    """Save a profile and apply it, as setup or a container start does."""
+    path = save_profile(home, profile, attachment, lead)
+    with patch.dict(os.environ, HOME=str(home)), patch("sys.stderr"):
+        boat_profile.prepare(profile)
+    return path
 
 
 class WorkerTests(unittest.TestCase):
@@ -108,7 +117,8 @@ import json, os, sys
 from pathlib import Path
 a = sys.argv[1:]
 home = Path(os.environ['HOME'])
-with (home/'calls').open('a') as f: f.write(json.dumps(a)+'\\n')
+stdin = sys.stdin.read() if a[0] == 'ssh' else ''
+with (home/'calls').open('a') as f: f.write(json.dumps(a + [stdin])+'\\n')
 if a[0] == 'new':
     (home/'name').write_text(a[a.index('--name')+1])
     if os.environ['T3_BOAT_PROFILE'] != 'claude-only': print(json.dumps({'event':'ready','id':'bx_1'}))
@@ -133,14 +143,83 @@ elif a[0] != 'delete': sys.exit(10)
                 self.assertIn(f"for {'a worker' if role is None else 'the harbor-crew ' + role + ' role'}", result.stdout)
                 invoked = [json.loads(line) for line in calls.read_text().splitlines()]
                 self.assertIn("--no-snapshots", invoked[0])
-                self.assertEqual(invoked[0][-2:], ["--environment", "team"])
-                self.assertEqual(invoked[-1], ["delete", "--yes", "bx_1"])
-                script = next(cmd for cmd in invoked if cmd[0] == "ssh")[2]
+                self.assertEqual(invoked[0][-3:-1], ["--environment", "team"])
+                self.assertEqual(invoked[-1], ["delete", "--yes", "bx_1", ""])
+                ssh = next(cmd for cmd in invoked if cmd[0] == "ssh")
+                self.assertEqual(ssh[2], worker.RUN_STDIN)  # The script travels on standard input only.
+                script = ssh[3]
                 for text in expected:
                     self.assertIn(text, script)
                 self.assertEqual("You are a worker on a disposable Boat VM, started by the T3 team lead." in script,
                                  role is None)
                 self.assertNotIn("git clone", script)
+
+    def fake_boat(self, ssh):
+        """A Boat CLI double on PATH; `ssh` is the shell snippet run for `boat ssh` (with the VM's stdin)."""
+        tools = self.home / "tools"
+        tools.mkdir(exist_ok=True)
+        (tools / "boat").write_text(f"""#!/bin/sh
+printf '%s\\n' "$*" >> "$HOME/boat-calls"
+case "$1" in
+  new) echo '{{"event":"ready","id":"bx_1"}}' ;;
+  ssh) {ssh} ;;
+  delete) touch "$HOME/deleted" ;;
+  *) exit 1 ;;
+esac
+""")
+        (tools / "boat").chmod(0o755)
+        project = self.home / "project"
+        project.mkdir(exist_ok=True)
+        for command in (["git", "init", "-q"], ["git", "config", "remote.origin.url", "https://github.com/a/b.git"],
+                        ["git", "config", "boat.environment", "team"]):
+            subprocess.run(command, cwd=project, env=self.env, check=True)
+        return project, self.env | {"PATH": f"{tools}:{self.env['PATH']}"}
+
+    def test_a_long_valid_guide_reaches_both_providers_on_a_dual_provider_worker(self):
+        # 71698 bytes passed twice in one argument exceeded the kernel's 128 KiB argument limit (E2BIG).
+        package = write_package(self.home / "long", roles={"scribe": 1}, sets={})
+        role_file = package / "crew/scribe/ROLE.md"
+        role_file.write_text("x" * 71697 + "\n")
+        self.assertEqual(role_file.stat().st_size, 71698)
+        save(self.home, "codex+claude", {"path": str(package), "model_set": None, "lead_role": None})
+        # The double runs the received script on a pretend VM home, up to the point T3 would be installed.
+        project, env = self.fake_boat('cat > "$HOME/received"; sed -n "/^npm install/q;p" "$HOME/received" > '
+                                      '"$HOME/until-npm"; VM="$HOME/vm"; TOOLS="$HOME/vmtools"; mkdir -p "$VM"; '
+                                      'HOME="$VM" PATH="$TOOLS:$PATH" sh -e "$HOME/until-npm"; exit 7')
+        vmtools = self.home / "vmtools"
+        vmtools.mkdir()
+        for name, body in (("codex", "echo 'Logged in using ChatGPT'"), ("claude", 'case "$1" in --version) echo 2.1.330 ;; *) echo \'{"loggedIn":true,"apiProvider":"firstParty","authMethod":"oauth_token"}\' ;; esac')):
+            (vmtools / name).write_text(f"#!/bin/sh\n{body}\n")
+            (vmtools / name).chmod(0o755)
+        result = subprocess.run([ROOT / "bin/boat-worker", "start", "scribe"], cwd=project, env=env | {
+            "T3_BOAT_PROFILE": "codex+claude"}, text=True, capture_output=True)
+        self.assertNotIn("Argument list too long", result.stderr)
+        self.assertIn("exit status 7", result.stderr)  # The double's own failure, after the guides were written.
+        self.assertTrue((self.home / "deleted").exists())
+        self.assertLess(max(map(len, (self.home / "boat-calls").read_text().splitlines())), 4096)
+        received = (self.home / "received").read_text()
+        self.assertGreater(len(received.encode()), 2 * 71698)
+        for target in (".codex/AGENTS.md", ".claude/CLAUDE.md"):
+            text = (self.home / "vm" / target).read_text()
+            self.assertIn("x" * 71697, text)
+            self.assertTrue(text.endswith("<!-- END t3-boat -->\n"))
+
+    def test_a_worker_is_refused_before_any_vm_while_the_profile_cannot_be_applied(self):
+        package = write_package(self.home / "big", roles={"scribe": 1}, sets={})
+        save(self.home, "codex+claude", {"path": str(package), "model_set": None, "lead_role": None})
+        (package / "crew/scribe/ROLE.md").write_text("x" * (playbook.MAX_FILE + 1))
+        with patch("sys.stderr"):
+            boat_profile.prepare("codex+claude")  # A container start: the oversized file disables the profile.
+        project, env = self.fake_boat("exit 1")
+        for role in ("scribe", None):
+            with self.subTest(role=role):
+                result = subprocess.run([ROOT / "bin/boat-worker", "start", *([role] if role else [])], cwd=project,
+                                        env=env | {"T3_BOAT_PROFILE": "codex+claude"}, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("profile is not applied, so no worker can start", result.stderr)
+                self.assertFalse((self.home / "boat-calls").exists())
+        with self.assertRaisesRegex(playbook.PlaybookError, "ROLE.md: larger than 1048576 bytes"):
+            playbook.load(str(package))
 
     def test_an_unbound_stub_refuses_before_any_vm(self):
         save(self.home, "codex-only")

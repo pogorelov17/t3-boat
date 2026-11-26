@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 import model_picker
 import playbook
+import playbook_skills
 from packages import write_package
 from test_model_picker import MODELS
 from test_profile import save
@@ -61,17 +62,34 @@ class ChoosePlaybookTests(unittest.TestCase):
         self.assertIn("Current playbook: none", output)
         self.assertIn("'bundled' for agent-playbook (version 7.1.0)", output)
 
-    def test_bundled_package_defaults_to_its_lead_role_and_the_set_named_like_the_profile(self):
-        result, output = self.choose("claude-only", None, "bundled", "", "")
+    def test_no_role_or_model_set_name_is_a_default_and_each_is_chosen_explicitly(self):
+        # Neither a role named `lead` nor a set named like the profile is preselected.
+        result, output = self.choose("claude-only", None, "bundled", "", "lead", "", "claude-only")
         self.assertEqual(result, {"path": str(self.bundled), "model_set": "claude-only", "lead_role": "lead"})
+        self.assertIn("Role the T3 team lead follows ('none' for no role): ", output)
+        self.assertIn("Select a listed role by number or name, or 'none'.", output)
+        self.assertIn("Select a listed model set by number or name, or 'none'.", output)
+        self.assertNotIn("[lead]", output)
+        self.assertNotIn("[claude-only]", output)
         self.assertIn("Model sets that need a provider claude-only does not enable: codex-only", output)
         self.assertIn("roles lead (1), builder (2)", output)
+
+    def test_none_selects_no_model_set_even_when_one_fits(self):
+        result, _ = self.choose("codex-only", None, str(self.custom), "rigger", "none")
+        self.assertEqual(result, {"path": str(self.custom), "model_set": None, "lead_role": "rigger"})
+
+    def test_the_bundled_choice_is_offered_only_when_the_image_has_one(self):
+        with patch.object(playbook, "BUNDLED", self.home / "absent"):
+            result, output = self.choose("codex-only", None, "bundled", "")
+        self.assertIsNone(result)
+        self.assertNotIn("'bundled'", output)
+        self.assertIn("bundled: enter an absolute directory path", output)
 
     def test_custom_path_after_an_invalid_one_with_explicit_role_choice(self):
         broken = write_package(self.home / "teams/broken")
         (broken / "assignments/codex-crew.json").write_text("{")
         result, output = self.choose("codex-only", None, str(self.home / "nowhere"), "teams/harbor", str(broken),
-                                     str(self.custom), "", "rigger", "")
+                                     str(self.custom), "", "rigger", "", "codex-crew")
         self.assertIn("is not a directory. Enter another path", output)
         self.assertIn("codex-crew.json: Expecting", output)
         self.assertIn("enter an absolute directory path", output)
@@ -128,7 +146,8 @@ class SetupWithPlaybookTests(unittest.TestCase):
         self.assertEqual(state["playbook"], {"path": str(self.custom), "model_set": "both-providers",
                                              "lead_role": "cartographer"})
         self.assertEqual(state["lead"], {"provider": "claudeAgent", "model": "claude-sonnet-5-2", "effort": "high"})
-        self.assertTrue((self.home / ".claude/skills/harbor-crew-cartographer/SKILL.md").is_file())
+        guide = playbook_skills.skill_path(self.home / ".claude", playbook.load(str(self.custom)), "cartographer")
+        self.assertTrue(guide.is_file())
 
     def test_a_package_that_breaks_later_is_reported_and_setup_can_detach_it(self):
         save(self.home, "codex-only", {"path": str(self.custom), "model_set": None, "lead_role": None})
@@ -139,7 +158,7 @@ class SetupWithPlaybookTests(unittest.TestCase):
         self.assertIsNone(json.loads((self.home / "profiles/codex-only.json").read_text())["playbook"])
 
     def test_status_names_a_broken_package_and_keeps_the_vm_check_receipt_valid(self):
-        code, _ = self.run_setup("codex-only", str(self.custom), "none", "", "gpt-6-luna", "", "", "")
+        code, _ = self.run_setup("codex-only", str(self.custom), "none", "none", "gpt-6-luna", "", "", "")
         self.assertEqual(code, 0)
         receipt = cli.read_receipt("codex-only", None)
         # Attaching another playbook does not change what the VM check covered.
