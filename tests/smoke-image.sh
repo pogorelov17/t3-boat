@@ -27,6 +27,9 @@ for profile in codex-only claude-only codex+claude; do
   volume=$(docker volume create)
   start
   docker exec "$container" sh -ec 'test "$(id -u)" != 0 && test -w /data && test "$HOME" = /data'
+  # Every installed t3-boat file is readable by the container user, whatever the build checkout's umask.
+  unreadable=$(docker exec "$container" find /opt/t3-boat ! -perm -a+r -print -quit)
+  [[ -z "$unreadable" ]] || { echo "Unreadable in the image: $unreadable" >&2; exit 1; }
   # A fresh install has no subscriptions or Boat project. Offline status must
   # report incomplete, even though the actual T3 backend is already serving.
   if docker exec "$container" t3-boat status; then
@@ -36,6 +39,10 @@ for profile in codex-only claude-only codex+claude; do
   if [[ "$profile" == codex-only ]]; then
     # The real server must return its provider snapshot even before login.
     docker exec "$container" python3 -c 'import sys; sys.path.insert(0, "/opt/t3-boat/lib"); from model_catalog import provider_snapshot; assert any(p["instanceId"] == "codex" for p in provider_snapshot("codex")["providers"])'
+  fi
+  if [[ "$profile" == codex+claude ]]; then
+    # Setup without a terminal keeps the saved workflow: exercise the role playbook here.
+    docker exec "$container" sh -ec 'mkdir -p /data/profiles && echo playbook > /data/profiles/workflow'
   fi
   # Exercise real setup, worker scripts and status against offline service doubles.
   docker exec -i "$container" sh -eu <<'SH'
@@ -102,6 +109,21 @@ test ! -e "$HOME/check-vm"
 t3-boat status | grep -F 'Setup verified'
 SH
   role_file="/data/profiles/$profile.json"
+  lead_dir=$(docker exec "$container" sh -c 'test "$(jq -r .lead.provider "$1")" = codex && echo .codex || echo .claude' _ "$role_file")
+  skill="/data/$lead_dir/skills/t3-boat/SKILL.md"
+  if [[ "$profile" == codex+claude ]]; then
+    docker exec "$container" jq -e 'keys | length == 7' "$role_file" >/dev/null
+    docker exec "$container" grep -Fq '## Role playbook' "$skill"
+    docker exec "$container" test -f "/data/$lead_dir/skills/agent-playbook-lead/SKILL.md"
+    { docker exec "$container" t3-boat status || true; } | grep -Fq 'Workflow: agent-playbook roles'
+  else
+    # A fresh generic setup selects one model, the lead row, and its VM check uses it.
+    docker exec "$container" jq -e 'keys == ["lead"]' "$role_file" >/dev/null
+    docker exec "$container" grep -Fq '## Generic workers' "$skill"
+    { docker exec "$container" t3-boat status || true; } | grep -Fq 'Workflow: generic workers'
+  fi
+  docker exec "$container" grep -Fq '## Machine boundary' "$skill"
+  docker exec "$container" grep -Fq '## Parent updates' "$skill"
   provider=$(docker exec "$container" jq -er .lead.provider "$role_file")
   model=$(docker exec "$container" jq -er .lead.model "$role_file")
   # No accounts, networking or worker VM: only the transcript is under test.

@@ -180,7 +180,7 @@ def parent_role(profile):
     if rows is MISSING:
         raise SetupError("The global role profile could not be read. Check docker logs t3-boat.")
     try:
-        role_profile.check_roles(rows)
+        role_profile.check_roles(rows, playbook_skills.workflow(Path.home()))
     except role_profile.ProfileError as error:
         raise ProfileError(f"{path}: {error}") from None
     return rows[PARENT]
@@ -209,39 +209,52 @@ def project_binding(git_dir):
     return repo_slug(probe(*git, "remote.origin.url") or ""), probe(*git, "boat.environment")
 
 
-def choose_playbook(providers):
-    """Ask whether to install the agent-playbook skills on this machine; the answer is saved."""
-    current = playbook_skills.chosen(Path.home())
-    saved = playbook_skills.state_path(Path.home()).exists()
-    state = "installed" if current else "not installed"
-    keep = f"your saved answer ({'yes' if current else 'no'})" if saved else "the default (no)"
+WORKFLOW_LABELS = {
+    "generic": "generic workers (no agent playbook)",
+    "playbook": "agent-playbook roles",
+    "roles": "role workflow without agent-playbook guides (kept from an earlier release)",
+}
+
+
+def choose_workflow(providers):
+    """Ask which workflow this machine uses and return it. Nothing is saved here: configure_roles applies the
+    answer together with the instructions it selects, so an interrupted setup keeps the earlier workflow."""
+    current = playbook_skills.workflow(Path.home())
+    committed = playbook_skills.workflow_path(Path.home()).exists()
     if not sys.stdin.isatty():
-        print(f"Agent-playbook skills: {state}, {keep}. Setup without a terminal asks nothing and keeps it; "
+        print(f"Workflow: {WORKFLOW_LABELS[current]}. Setup without a terminal asks nothing and keeps it; "
               "run setup in a terminal to change it.")
-        return
+        return current
     homes = {"codex": os.environ.get("CODEX_HOME") or Path.home() / ".codex",
              "claude": os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"}
-    print("Without the agent playbook (the default), the team lead delegates any task to generic Boat workers "
-          "with a brief it writes. No roles or reviews are required.")
-    print(f"Agent playbook {playbook.commit()[:12]}: a predefined role workflow with role guides and skills for the "
-          f"team lead and every worker role ({', '.join(playbook.roles())}).")
-    print("If you install them, every project on this machine follows that workflow. Nothing is added to your repositories.")
-    print("The team lead then follows its guide from its first response, including ordinary discussion.")
+    choices = ["generic", "playbook"] + (["roles"] if current == "roles" else [])
+    print("Choose the workflow for every project on this machine. Nothing is added to your repositories.")
+    print("  1. generic: the team lead delegates any task to generic Boat workers with a brief it writes. "
+          "You choose one model; no roles or reviews are required. The default for a new installation.")
+    print(f"  2. playbook: agent-playbook {playbook.commit()[:12]}, a predefined role workflow with a model for "
+          f"every role ({', '.join(playbook.roles())}), model rules and role guides installed as skills. "
+          "The team lead follows its guide from its first response, including ordinary discussion.")
     for provider in providers:
-        print(f"  {provider}: {Path(homes[provider]) / 'skills' / (playbook_skills.PREFIX + 'ROLE') / 'SKILL.md'}")
-    print("Each Boat worker VM also receives its own role's guide in its provider instruction file "
+        print(f"     {provider}: {Path(homes[provider]) / 'skills' / (playbook_skills.PREFIX + 'ROLE') / 'SKILL.md'}")
+    print("     Each Boat worker VM also receives its own role's guide in its provider instruction file "
           "(~/.codex/AGENTS.md or ~/.claude/CLAUDE.md on the VM). Files you created yourself are never replaced.")
-    print(f"Press Enter to keep {keep}.")
+    if current == "roles":
+        print("  3. roles: keep the role workflow this installation used with an earlier release, "
+              "without the agent-playbook guides.")
+    keep = "your saved workflow" if committed or current == "roles" else "the default"
+    print(f"Press Enter to keep {keep} ({current}).")
     while True:
-        reply = input(f"Install the agent-playbook skills on this machine? [{'Y/n' if current else 'y/N'}] ").strip().lower()
-        if reply in ("", "y", "yes", "n", "no"):
+        reply = input(f"Workflow [{current}]: ").strip().lower()
+        selected = current if not reply else next(
+            (choice for number, choice in enumerate(choices, start=1) if reply in (choice, str(number))), None)
+        if selected:
             break
-        print("Answer y or n.")
-    install = reply in ("y", "yes") or (not reply and current)
-    write(playbook_skills.state_path(Path.home()), "yes\n" if install else "no\n")
-    print("Agent-playbook skills will be installed; projects follow the role workflow." if install else
-          "Agent-playbook skills are not installed; the team lead delegates to generic workers. "
-          "Rerun setup to add them later.")
+        print("Answer " + ", ".join(choices) + " or its number.")
+    print({"generic": "The team lead will delegate to generic workers.",
+           "playbook": "Agent-playbook skills will be installed; projects follow the role workflow.",
+           "roles": "Projects keep the role workflow without the agent-playbook guides."}[selected]
+          + " It applies once you accept the models below; rerun setup to change it.")
+    return selected
 
 
 def setup(profile, providers):
@@ -255,7 +268,7 @@ def setup(profile, providers):
         raise ProfileError(f"{path}: {error.strerror or error}") from None
     if rows is not MISSING:
         try:
-            role_profile.check_roles(rows)
+            role_profile.check_roles(rows, playbook_skills.workflow(Path.home()))
         except role_profile.ProfileError as error:
             raise ProfileError(f"{path}: {error}") from None
     for provider in providers:
@@ -269,8 +282,7 @@ def setup(profile, providers):
                 run("claude", "auth", "login")
             if not logged_in(provider):
                 raise SetupError(f"A {provider} subscription login is required. Rerun setup to resume.")
-    choose_playbook(providers)
-    configure_roles(profile)
+    configure_roles(profile, choose_workflow(providers))
     existing = projects()
     optional = " (Enter to resume existing projects)" if existing else " (Enter to start with an idea)"
     url = input(f"GitHub repository URL{optional}: ").strip()
@@ -331,8 +343,7 @@ def status(profile, providers):
             failures.append(label)
 
     report("T3 HTTP server", t3_online())
-    print("Workflow: " + ("agent-playbook roles" if playbook_skills.chosen(Path.home()) else
-                          "generic workers (no agent playbook)"))
+    print("Workflow: " + WORKFLOW_LABELS[playbook_skills.workflow(Path.home())])
     problem = None
     try:
         lead = parent_role(profile)

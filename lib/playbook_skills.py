@@ -10,21 +10,64 @@ from pathlib import Path
 
 import playbook
 
-STATE = Path("profiles/playbook-skills")  # Relative to the home directory; holds "yes" or "no".
+# Both paths are relative to the home directory. STATE holds "yes" or "no" for the agent-playbook guides,
+# as earlier releases wrote it; WORKFLOW holds the workflow setup committed, one of WORKFLOWS.
+STATE = Path("profiles/playbook-skills")
+WORKFLOW = Path("profiles/workflow")
 PREFIX = "agent-playbook-"
 MARK = "<!-- t3-boat: generated from agent-playbook"
+# generic: the lead briefs generic workers and the profile needs only the `lead` row.
+# playbook: the agent-playbook role workflow, with its role guides installed as skills.
+# roles: the role workflow without the guides, kept for installations set up by an earlier release.
+WORKFLOWS = ("generic", "playbook", "roles")
 
 
 def state_path(home):
     return Path(home) / STATE
 
 
-def chosen(home):
-    """Whether the owner chose to install the playbook skills on this machine."""
+def workflow_path(home):
+    return Path(home) / WORKFLOW
+
+
+def _read(path):
     try:
-        return state_path(home).read_text().strip() == "yes"
+        return path.read_text().strip()
     except OSError:
-        return False
+        return None
+
+
+def workflow(home):
+    """The workflow of this machine: the one setup committed, or the one an earlier release used.
+
+    Earlier releases always ran the role workflow and saved only whether the guides were installed. An
+    installation they set up (a saved guide answer or a saved role profile) keeps the role workflow until
+    the owner chooses another one in setup; only a fresh installation starts with generic workers.
+    """
+    home = Path(home)
+    committed = _read(workflow_path(home))
+    if committed in WORKFLOWS:
+        return committed
+    guides = _read(state_path(home))
+    if guides == "yes":
+        return "playbook"
+    if guides is not None or any((home / "profiles").glob("*.json")):
+        return "roles"
+    return "generic"
+
+
+def chosen(home):
+    """Whether the agent-playbook guides are installed on this machine (the playbook workflow)."""
+    return workflow(home) == "playbook"
+
+
+def state_files(home, selected):
+    """The state files that commit workflow `selected`: write them after the instructions they describe."""
+    if selected not in WORKFLOWS:
+        raise ValueError(f"Unknown workflow {selected!r}")
+    # The guide answer keeps its meaning for an earlier release: only the playbook installs guides.
+    return {state_path(home): ("yes" if selected == "playbook" else "no") + "\n",
+            workflow_path(home): selected + "\n"}
 
 
 def skill_path(base, role):
@@ -66,14 +109,15 @@ def obstacle(base, path):
     return None
 
 
-def plan(home, bases, enabled):
+def plan(home, bases, enabled, install=None):
     """Return (files to write, generated files to remove, kept custom files, blocked guides).
 
     `bases` maps each provider instance to its configuration directory; `enabled` lists the active ones.
+    `install` says whether guides are wanted; by default, whether this machine uses the playbook workflow.
     Kept files are regular files the owner made at a guide path. Blocked guides are (guide path, obstacle)
     pairs where something else occupies the path; they are neither written nor named to the team lead.
     """
-    install = chosen(home)
+    install = chosen(home) if install is None else install
     roles = set(playbook.roles()) if install else set()
     writes, removals, kept, blocked = {}, [], [], []
     for provider, base in bases.items():

@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import playbook_skills
-from role_profile import PARENT, PROVIDERS, OPTION, read_profile
+from role_profile import PARENT, PROVIDERS, OPTION, read_profile, uses_roles
 
 
 def output(*args):
@@ -58,8 +58,8 @@ WORKER_NOTE = """You are a worker on a disposable Boat VM, started by the T3 tea
 def role_guide(provider, guide):
     """Append the worker's instructions (a role guide or WORKER_NOTE) to its provider's global instruction file.
 
-    Codex reads a non-empty AGENTS.override.md instead of AGENTS.md, so the worker stops before the
-    instructions are reported as delivered when one would hide them.
+    Codex reads a non-empty AGENTS.override.md instead of AGENTS.md. When the Boat environment provides one,
+    the instructions are appended to that file, after the owner's own text, so Codex reads both.
     """
     if guide is None:
         return ""
@@ -69,8 +69,8 @@ def role_guide(provider, guide):
         target = '"${CODEX_HOME:-$HOME/.codex}/AGENTS.md"'
         masked = """override="${CODEX_HOME:-$HOME/.codex}/AGENTS.override.md"
 if [ -f "$override" ] && [ -s "$override" ]; then
-  echo "$override on the worker VM masks the t3-boat worker instructions in AGENTS.md; remove it from the Boat environment" >&2
-  exit 1
+  guide=$override
+  echo "Codex reads $override on this VM; the t3-boat worker instructions are appended to it" >&2
 fi"""
     else:
         target, masked = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md"', ""
@@ -259,8 +259,10 @@ def verify(environment, slug=None):
                   + shlex.join(["ls-remote", "https://github.com/" + slug + ".git", "HEAD"]),
                   f"Git read access to {slug}")
         prompt = "Reply with exactly BOAT_OK. Do not use tools."
+        # Prefer the executor's model, then the lead's (a generic profile may hold only the lead row).
+        preferred = [roles[key] for key in ("executor", PARENT) if key in roles]
         for provider in PROVIDERS[profile]:
-            role = next((r for r in (roles["executor"], *roles.values()) if r["provider"] == provider), None)
+            role = next((r for r in (*preferred, *roles.values()) if r["provider"] == provider), None)
             if provider == "codex":
                 args = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", "reply"]
                 if role:
@@ -283,17 +285,33 @@ def verify(environment, slug=None):
 
 
 def start(role_name=None):
-    """Start a worker for a profile row, or a generic worker when no row is named."""
+    """Start a worker for a profile row, or a generic worker when no row is named.
+
+    With generic workers, a named row is a model preset and the worker gets WORKER_NOTE. In a workflow with
+    roles, every worker has a role: the playbook writes its guide, and an installation kept from an earlier
+    release writes nothing, as it did then. A generic worker is refused there, because its note lets it
+    split its work, which the roles do not allow.
+    """
     profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
-    roles = read_profile(profile)
+    workflow = playbook_skills.workflow(Path.home())
+    roles = read_profile(profile, workflow)
+    children = ", ".join(key for key in roles if key != PARENT)
     if role_name is None:
+        if uses_roles(workflow):
+            raise ValueError("This machine uses the role workflow, so every worker has a role. Run boat-worker "
+                             f"start ROLE with a row of the active profile ({children}); rerun t3-boat setup "
+                             "to switch to generic workers")
         # A generic worker opens with the lead's model; every provider of the profile stays selectable.
-        role, providers, label, role_guide_text = roles[PARENT], PROVIDERS[profile], "a generic worker", None
+        role, providers, label, note = roles[PARENT], PROVIDERS[profile], "a generic worker", WORKER_NOTE
     elif role_name == PARENT or role_name not in roles:
-        raise ValueError("Select a child role from the active profile, or run boat-worker start for a generic worker")
+        if uses_roles(workflow):
+            raise ValueError(f"Select a child role from the active profile: {children}")
+        raise ValueError("Run boat-worker start for a generic worker"
+                         + (f", or name a preset of the active profile: {children}" if children else ""))
     else:
         role, providers, label = roles[role_name], None, role_name
-        role_guide_text = playbook_skills.worker_guide(Path.home(), role_name)
+        guide = playbook_skills.worker_guide(Path.home(), role_name)
+        note = guide if workflow == "playbook" else None if uses_roles(workflow) else WORKER_NOTE
     # Only provision from a configured project stub; nothing on the host fetches origin.
     binding = subprocess.run(["git", "config", "--local", "--get", "boat.environment"],
                              text=True, capture_output=True)
@@ -305,8 +323,8 @@ def start(role_name=None):
     vm = provision(name, environment)
     print(f"Boat ID: {vm}", flush=True)
     try:
-        link(vm, role, role_guide_text or WORKER_NOTE, providers)
-        if role_guide_text:
+        link(vm, role, note, providers)
+        if note and note is not WORKER_NOTE:
             print(f"Installed the agent-playbook {role_name} guide on {vm}", flush=True)
     except BaseException:
         subprocess.run(["boat", "delete", "--yes", vm], check=True)

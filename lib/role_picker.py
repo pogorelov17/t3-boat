@@ -3,8 +3,10 @@ import re
 from pathlib import Path
 
 import playbook
+import playbook_skills
 from model_catalog import catalog
-from role_profile import MISSING, PROVIDERS, ProfileError, json_kind, prepare, saved_rows, validate_profile
+from role_profile import (MISSING, PARENT, PROVIDERS, ProfileError, json_kind, prepare, saved_rows, uses_roles,
+                          validate_profile)
 
 
 def stock_templates(profile):
@@ -90,9 +92,17 @@ def saved_assignments(saved):
     return rows
 
 
-def configure_roles(profile):
+def configure_roles(profile, workflow=None):
+    """Pick the models for `workflow` (by default, this machine's) and apply them together with it.
+
+    Generic workers need one model, the `lead` row, which the team lead and every generic worker open with;
+    saved rows for other roles stay in the profile unchanged as presets. A workflow with roles shows every
+    role row, filling the rows a generic profile lacks from the model set's defaults.
+    """
     if profile not in PROVIDERS:
         raise ValueError(f"Unknown role profile {profile!r}")
+    workflow = workflow or playbook_skills.workflow(Path.home())
+    roles = uses_roles(workflow)
     discovered = catalog(profile)
     available = {
         provider: {model: efforts for model, efforts in discovered.get(provider, {}).items() if efforts}
@@ -107,15 +117,27 @@ def configure_roles(profile):
     defaults = resolve_defaults(profile, templates, available)
     rows = saved_assignments(saved)
     if rows is not MISSING:
-        print(f"Saved role assignments for {profile}")
+        print(f"Saved {'role assignments' if roles else 'model'} for {profile}")
     else:
-        rows = {role: dict(row) for role, row in defaults.items()}
-        print(f"Suggested role assignments for {profile}")
+        rows = {}
+        print(f"Suggested {'role assignments' if roles else 'model'} for {profile}")
+    if roles:
+        missing = {role: dict(row) for role, row in defaults.items() if role not in rows}
+        if missing and rows:
+            print("Suggested models for the roles the saved profile lacks: " + ", ".join(missing))
+        rows = {**{role: rows.get(role, missing.get(role)) for role in defaults}, **rows}
+    else:
+        rows = {PARENT: dict(defaults[PARENT]), **rows}
+        print("Generic workers need one model: the team lead and every generic worker open with the lead row, "
+              "and the lead can pick another listed model for each brief.")
+    # Generic workers edit only the lead row; any other saved row is kept as it is, as a preset.
+    shown = list(rows) if roles else [PARENT]
 
     while True:
         print("   Role             Provider / Model / Effort")
         unresolved = []
-        for number, (role, row) in enumerate(rows.items(), start=1):
+        for number, role in enumerate(shown, start=1):
+            row = rows[role]
             model_efforts = available.get(row.get("provider"), {}).get(row.get("model"), [])
             issue = ""
             if not model_efforts:
@@ -128,6 +150,8 @@ def configure_roles(profile):
         action = input("Enter to accept, a role number or name to edit, or 'refresh' for current family defaults: ").strip()
         if action == "refresh":
             for role, default in defaults.items():
+                if role not in shown:
+                    continue
                 if rows.get(role) != default:
                     print(f"{role}: {assignment(rows.get(role, {}))} -> {assignment(default)}")
                 rows[role] = dict(default)
@@ -137,13 +161,13 @@ def configure_roles(profile):
                 print("Choose a model and supported effort for " + ", ".join(unresolved) + ".")
                 continue
             try:
-                validate_profile(profile, rows)
+                validate_profile(profile, rows, workflow)
             except ValueError as error:
                 print(error)
                 continue
-            prepare(profile, rows)
+            prepare(profile, rows, workflow)
             return
-        role = option(action, list(rows))
+        role = option(action, shown)
         if role is None:
             print("Select a listed role by number or name.")
             continue

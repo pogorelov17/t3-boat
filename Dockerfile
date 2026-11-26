@@ -44,7 +44,8 @@ COPY bin/ /opt/t3-boat/bin/
 COPY lib/ /opt/t3-boat/lib/
 COPY --chmod=755 scripts/install-claude /usr/local/bin/install-claude
 COPY skills/t3-boat/ /opt/t3-boat/skills/t3-boat/
-RUN chmod 755 /opt/t3-boat/bin/* && chmod -R a+rX,go-w /opt/t3-boat/skills \
+# COPY keeps the build checkout's modes; a restrictive umask there must not hide files from the node user.
+RUN chmod -R a+rX,go-w /opt/t3-boat/bin /opt/t3-boat/lib /opt/t3-boat/skills && chmod 755 /opt/t3-boat/bin/* \
     && ln -s /opt/t3-boat/bin/boat-worker /usr/local/bin/boat-worker \
     && ln -s /opt/t3-boat/bin/t3-boat /usr/local/bin/t3-boat \
     && ln -s /data/.local/bin/claude /usr/local/bin/claude

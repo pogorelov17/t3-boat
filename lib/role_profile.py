@@ -55,18 +55,26 @@ def json_kind(value):
     return {type(None): "null", list: "an array", str: "a string", bool: "a boolean"}.get(type(value), "a number")
 
 
-def check_roles(rows):
-    """Require a JSON object holding every role of this release."""
+def uses_roles(workflow):
+    """Whether a workflow assigns the playbook's roles, so every role row and the model rules apply."""
+    return workflow != "generic"
+
+
+def check_roles(rows, workflow="playbook"):
+    """Require a JSON object holding every role of this release, or only `lead` for generic workers."""
     if not isinstance(rows, dict):
         raise ProfileError(f"expected a JSON object of roles, found {json_kind(rows)}")
-    missing = [role for role in REQUIRED if role not in rows]
+    required = REQUIRED if uses_roles(workflow) else (PARENT,)
+    missing = [role for role in required if role not in rows]
     if missing:
-        raise ProfileError("expected roles " + ", ".join(REQUIRED) + "; missing " + ", ".join(missing))
+        raise ProfileError("expected roles " + ", ".join(required) + "; missing " + ", ".join(missing))
 
 
-def validate_profile(name, rows):
+def validate_profile(name, rows, workflow="playbook"):
+    """Check a profile for a workflow. Generic workers need a valid `lead` row; every saved row keeps a valid
+    shape, but the playbook's model rules between rows apply only to a workflow with roles."""
     check_profile_name(name)
-    check_roles(rows)
+    check_roles(rows, workflow)
     for role, row in rows.items():
         if not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", role) or not isinstance(row, dict):
             raise ProfileError(f"invalid role {role!r}")
@@ -75,6 +83,8 @@ def validate_profile(name, rows):
         for key in ("model", "effort"):
             if not isinstance(row.get(key), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:_/-]*", row[key]):
                 raise ProfileError(f"invalid {key} for {role}")
+    if not uses_roles(workflow):
+        return rows
     # The playbook's model rules: a model is its provider plus family, and effort does not tell two apart.
     for role, other, shared in playbook.rules(name):
         mine, theirs = rows[role], rows[other]
@@ -124,14 +134,16 @@ def saved_rows(target, missing=None):
         raise ProfileError(f"{target}: {exc}") from None
 
 
-def read_profile(name):
+def read_profile(name, workflow=None):
+    """The saved profile, checked for `workflow` (by default, this machine's)."""
     check_profile_name(name)
+    workflow = workflow or playbook_skills.workflow(Path.home())
     target = Path.home() / "profiles" / (name + ".json")
     rows = saved_rows(target, missing=MISSING)
     if rows is MISSING:
-        raise ProfileError("Select role models with t3-boat setup first")
+        raise ProfileError("Select models with t3-boat setup first")
     try:
-        return validate_profile(name, rows)
+        return validate_profile(name, rows, workflow)
     except ProfileError as exc:  # Anything else is a defect and keeps its traceback.
         raise ProfileError(f"{target}: {exc}") from exc
 
@@ -150,13 +162,23 @@ def instructions(path, content):
     return previous + ("\n\n" if previous else "") + block + "\n"
 
 
-def prepare(name, rows=None):
+def prepare(name, rows=None, workflow=None):
+    """Write the T3 settings and instructions for this machine's workflow.
+
+    Setup passes the rows and the workflow the owner chose; both are saved with the instructions, and the
+    workflow is committed last, so an interrupted or failed setup leaves the earlier workflow and its files.
+    A container start passes neither and regenerates everything from the saved state.
+    """
     check_profile_name(name)
     home = Path.home()
     role_path = home / "profiles" / (name + ".json")
     save_selection = rows is not None
+    commit = workflow is not None
+    workflow = workflow or playbook_skills.workflow(home)
+    if workflow not in playbook_skills.WORKFLOWS:
+        raise ValueError(f"Unknown workflow {workflow!r}")
     if rows is None and profile_present(role_path):
-        rows = read_profile(name)
+        rows = read_profile(name, workflow)
     enabled = PROVIDERS[name]
     settings_path = Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
     raw = settings_path.read_bytes() if settings_path.exists() else b"{}"
@@ -172,7 +194,7 @@ def prepare(name, rows=None):
     if rows is None:
         settings.pop("defaultModelSelection", None)
     else:
-        validate_profile(name, rows)
+        validate_profile(name, rows, workflow)
         parent = rows[PARENT]
         settings["defaultModelSelection"] = {
             "instanceId": parent["provider"], "model": parent["model"],
@@ -182,13 +204,15 @@ def prepare(name, rows=None):
     for provider in OPTION:
         instances.setdefault(provider, {}).update(driver=provider, enabled=provider in enabled)
 
-    # Without the owner's opt-in to the agent-playbook the lead delegates to generic workers; with it, the
-    # playbook's role workflow applies. The shared part (machine boundary, parent updates, cleanup) is in both.
-    roles_mode = playbook_skills.chosen(home)
+    # Generic workers unless the owner chose a role workflow; the shared part (machine boundary, parent
+    # updates, cleanup) is in every workflow.
+    roles_mode = uses_roles(workflow)
     policy = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip() + "\n\n" + (
         ROOT / "skills/t3-boat" / ("playbook.md" if roles_mode else "generic.md")).read_text()
-    heading, column = ("## Active roles", "Role") if roles_mode else ("## Model presets", "Preset")
-    table = [heading, "", f"| {column} | Provider | Model | Option |", "| --- | --- | --- | --- |"]
+    if roles_mode:
+        table = ["## Active roles", "", "| Role | Provider | Model | Option |", "| --- | --- | --- | --- |"]
+    else:
+        table = ["## Models", "", "| Row | Provider | Model | Option |", "| --- | --- | --- | --- |"]
     for role, row in (rows or {}).items():
         table.append(f"| {role} | {row['provider']} | {row['model']} | {OPTION[row['provider']]}={row['effort']} |")
     targets = [
@@ -196,7 +220,8 @@ def prepare(name, rows=None):
         ("claudeAgent", Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude"), "CLAUDE.md"),
     ]
     # The owner's setup choice: agent-playbook role guides as skills for every enabled provider.
-    skill_files, stale_skills, kept, blocked = playbook_skills.plan(home, {p: base for p, base, _ in targets}, enabled)
+    skill_files, stale_skills, kept, blocked = playbook_skills.plan(home, {p: base for p, base, _ in targets}, enabled,
+                                                                    workflow == "playbook")
     updates = dict(skill_files)
     installed = set(skill_files) | set(kept)  # Only guide files that will exist; a blocked path is never named.
     for provider, base, filename in targets:
@@ -232,6 +257,9 @@ def prepare(name, rows=None):
     for path, data in updates.items():
         write(path, data)
     playbook_skills.remove(stale_skills)
+    if commit:  # Last: until this point the earlier workflow and its files stay in effect.
+        for path, data in playbook_skills.state_files(home, workflow).items():
+            write(path, data)
     for path in kept:
         print(f"T3 Boat: kept your own {path}; it has no t3-boat marker, so it is used in place of the "
               "agent-playbook guide.", file=sys.stderr)

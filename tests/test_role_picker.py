@@ -64,7 +64,7 @@ class RolePickerTests(unittest.TestCase):
             replacement.start()
             self.addCleanup(replacement.stop)
 
-    def choose(self, *entries, profile=PROFILE):
+    def choose(self, *entries, profile=PROFILE, workflow="playbook"):
         answers = iter(entries)
         output = io.StringIO()
 
@@ -76,7 +76,7 @@ class RolePickerTests(unittest.TestCase):
                 raise EOFError("Interrupted test input") from None
 
         with patch("builtins.input", answer), redirect_stdout(output):
-            self.configure(profile)
+            self.configure(profile, workflow)
         return output.getvalue()
 
     def test_enter_resolves_latest_stable_compatible_family_and_applies_parent(self):
@@ -165,6 +165,67 @@ class RolePickerTests(unittest.TestCase):
         self.assertIn("reviewer1", output)
         rows = json.loads(self.saved.read_text())
         self.assertEqual(rows["reviewer1"]["model"], "claude-fable-5-2")
+
+    def workflow(self):
+        return (self.home / "profiles/workflow").read_text().strip()
+
+    def test_generic_setup_picks_one_model_and_saves_only_the_lead_row(self):
+        # A fresh generic setup must not need a model for every role, nor a valid reviewer roster.
+        output = self.choose("", workflow="generic")
+        rows = json.loads(self.saved.read_text())
+        self.assertEqual(list(rows), ["lead"])
+        self.assertEqual(rows["lead"], dict(provider="codex", model="gpt-6.2-astra", effort="high"))
+        self.assertNotIn("reviewer1", output)
+        self.assertNotIn("executor", output)
+        self.assertEqual(self.workflow(), "generic")
+        settings = json.loads((self.home / ".t3/userdata/settings.json").read_text())
+        self.assertEqual(settings["defaultModelSelection"]["model"], "gpt-6.2-astra")
+
+    def test_generic_setup_edits_only_the_lead_row(self):
+        with self.assertRaises(EOFError):  # Only the lead row is listed; another number is refused.
+            self.choose("2", "executor", workflow="generic")
+        self.assertFalse(self.saved.exists())
+        self.choose("lead", "claudeAgent", "claude-opus-4-5", "high", "", workflow="generic")
+        self.assertEqual(json.loads(self.saved.read_text()),
+                         {"lead": dict(provider="claudeAgent", model="claude-opus-4-5", effort="high")})
+
+    def test_generic_setup_keeps_saved_presets_without_validating_their_families(self):
+        self.choose("")
+        before = json.loads(self.saved.read_text())
+        # Presets that break the playbook's model rules or name a model no longer listed stay as saved.
+        before["reviewer1"] = dict(before["executor"])
+        before["scout"]["model"] = "retired-model"
+        before["lead"]["model"] = "gpt-6.10-sol"
+        before["lead"]["effort"] = "medium"
+        self.saved.write_text(json.dumps(before))
+        output = self.choose("refresh", "", workflow="generic")
+        after = json.loads(self.saved.read_text())
+        self.assertEqual(after["lead"], dict(provider="codex", model="gpt-6.2-astra", effort="high"))
+        self.assertEqual({k: v for k, v in after.items() if k != "lead"},
+                         {k: v for k, v in before.items() if k != "lead"})
+        self.assertNotIn("retired-model", output)
+        self.assertEqual(self.workflow(), "generic")
+
+    def test_switching_a_generic_profile_to_the_playbook_fills_and_checks_every_role(self):
+        self.choose("", workflow="generic")
+        lead = json.loads(self.saved.read_text())["lead"]
+        output = self.choose("", workflow="playbook")
+        rows = json.loads(self.saved.read_text())
+        self.assertEqual(set(rows), set(role_profile_required()))
+        self.assertEqual(rows["lead"], lead)
+        self.assertIn("lacks", output)
+        self.assertEqual(self.workflow(), "playbook")
+        # The role workflow enforces the model rules that generic presets skip.
+        rows["reviewer1"] = dict(rows["executor"])
+        self.saved.write_text(json.dumps(rows))
+        with self.assertRaises(EOFError):
+            self.choose("", workflow="playbook")
+        self.assertEqual(json.loads(self.saved.read_text()), rows)
+
+
+def role_profile_required():
+    import role_profile
+    return role_profile.REQUIRED
 
 
 if __name__ == "__main__":
