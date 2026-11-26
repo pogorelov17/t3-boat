@@ -134,10 +134,22 @@ SH
   [[ -n "$environment" ]]
   docker exec "$container" python3 -c 'import runpy; runpy.run_path("/opt/t3-boat/bin/t3-boat")["register"]("sample/new-app", "test")'
   [[ $(docker exec "$container" git -C /data/start-here remote get-url origin) = https://github.com/sample/new-app.git ]]
+  left_behind=
+  if [[ "$profile" == codex-only ]]; then
+    # Setup under another profile can choose the role playbook for the whole volume. This lead-only
+    # profile then no longer fits; the container must still start so that setup can complete it.
+    docker exec "$container" sh -ec 'echo playbook > /data/profiles/workflow'
+    left_behind=1
+  fi
   docker stop "$container" >/dev/null
   docker rm "$container" >/dev/null
   container=
   start
+  if [[ -n "$left_behind" ]]; then
+    docker logs "$container" 2>&1 | grep -Fq 'run t3-boat setup with T3_BOAT_PROFILE=codex-only to complete it'
+    { docker exec "$container" t3-boat status || true; } | grep -Fq 'T3_BOAT_PROFILE=codex-only to complete it'
+    docker exec "$container" jq -e 'keys == ["lead"]' "$role_file" >/dev/null
+  fi
   [[ $(docker exec "$container" cat /data/.t3/userdata/environment-id) = "$environment" ]]
   docker exec "$container" t3 thread list --project /data/start-here --json |
     jq -e --arg id "$thread" 'any(.[]; .threadId == $id)' >/dev/null

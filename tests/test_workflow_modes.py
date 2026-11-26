@@ -18,10 +18,16 @@ import playbook_skills
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = ("codex-only", "codex+claude", "claude-only")
+EFFORTS = ["low", "medium", "high", "xhigh"]
+# The models seeded_roles selects, as the provider catalog would list them.
+MODELS = {"codex": {"gpt-6.2-sol": EFFORTS, "gpt-6.2-astra": EFFORTS, "gpt-6.2-luna": EFFORTS},
+          "claudeAgent": {m: EFFORTS for m in ("claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5",
+                                               "claude-haiku-5-5")}}
 TARGETS = {"codex": (".codex", "AGENTS.md"), "claudeAgent": (".claude", "CLAUDE.md")}
 worker = SourceFileLoader("boat_worker_modes", str(ROOT / "bin/boat-worker")).load_module()
 cli = SourceFileLoader("t3_boat_modes", str(ROOT / "bin/t3-boat")).load_module()
 import role_picker  # noqa: E402  (the CLI module put lib/ on the path)
+import role_profile  # noqa: E402
 
 
 def lead_only(home, profile):
@@ -29,6 +35,13 @@ def lead_only(home, profile):
     rows = {"lead": seeded_roles(home, profile)["lead"]}
     (Path(home) / "profiles" / (profile + ".json")).write_text(json.dumps(rows, indent=2) + "\n")
     return rows
+
+
+def rows_for(profile, only_lead=False):
+    """The rows seeded_roles saves, without saving them."""
+    with tempfile.TemporaryDirectory() as scratch:
+        rows = seeded_roles(scratch, profile)
+    return {"lead": rows["lead"]} if only_lead else rows
 
 
 class Home(unittest.TestCase):
@@ -70,7 +83,80 @@ class Home(unittest.TestCase):
         return (self.home / folder / filename).read_text()
 
     def snapshot(self):
-        return {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file()}
+        # Generated text names the home directory; compare installations made in different ones.
+        return {p.relative_to(self.home): p.read_bytes().replace(bytes(self.home), b"~")
+                for p in self.home.rglob("*") if p.is_file()}
+
+    def setup_run(self, *answers, catalog=None, profile="codex-only"):
+        replies = iter(answers)
+
+        def answer(prompt):
+            print(prompt)
+            try:
+                reply = next(replies)
+            except StopIteration:
+                raise EOFError() from None
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+
+        stdin = MagicMock()
+        stdin.isatty.return_value = True
+        # Setup stops at the Boat login, after the workflow and models are applied.
+        with patch.dict(os.environ, HOME=str(self.home)), patch("builtins.input", answer), \
+                patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
+                patch.object(cli, "probe", return_value=None), \
+                patch.object(cli, "run", side_effect=self.stop_at_boat), \
+                patch.object(role_picker, "catalog", return_value=MODELS if catalog is None else catalog), patch.object(cli.sys, "stdin", stdin), \
+                redirect_stdout(StringIO()) as out:
+            try:
+                cli.setup(profile, cli.PROFILES[profile])
+            except (Exception, KeyboardInterrupt) as error:  # An interrupt is under test.
+                return error, out.getvalue()
+        return None, out.getvalue()
+
+    def stub(self, ssh_status=9):
+        project = self.home / "project"
+        project.mkdir(exist_ok=True)
+        for command in (["git", "init", "-q"], ["git", "config", "remote.origin.url", "https://github.com/sample/repo.git"],
+                        ["git", "config", "boat.environment", "team"]):
+            subprocess.run(command, cwd=project, env=self.env, check=True)
+        boat = self.home / "boat"
+        boat.write_text(f"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+a = sys.argv[1:]
+home = Path(os.environ['HOME'])
+with (home/'calls').open('a') as f: f.write(json.dumps(a)+'\\n')
+if a[0] == 'new': print(json.dumps({{'event':'ready','id':'bx_1'}}))
+elif a[0] == 'ssh': sys.exit({ssh_status})
+elif a[0] == 'delete' and '--json' in a:
+    print(json.dumps({{'operation':{{'id':'bdop_1','targetId':'bx_1','kind':'sandbox','status':'completed'}}}}))
+elif a[0] != 'delete': sys.exit(10)
+""")
+        boat.chmod(0o755)
+        return project
+
+    def run_worker(self, project, profile, *args):
+        (self.home / "calls").unlink(missing_ok=True)
+        env = self.env | {"PATH": str(self.home) + ":" + self.env["PATH"], "T3_BOAT_PROFILE": profile}
+        result = subprocess.run([ROOT / "bin/boat-worker", *args], cwd=project, env=env,
+                                text=True, capture_output=True)
+        recorded = self.home / "calls"
+        calls = [json.loads(line) for line in recorded.read_text().splitlines()] if recorded.exists() else []
+        return result, calls
+
+    def start(self, project, profile, *role):
+        return self.run_worker(project, profile, "start", *role)
+
+    @staticmethod
+    def stop_at_boat(*argv):
+        """The installer and logins succeed; the Boat login, after the models are applied, does not."""
+        if argv[0] == "boat":
+            raise cli.SetupError("Boat login is incomplete.")
+
+    def startup_settings(self):
+        return json.loads((self.home / ".t3/userdata/settings.json").read_text())
 
     def assertGeneric(self, skill):
         policy = skill.split("## Models", 1)[0]
@@ -94,6 +180,11 @@ class Home(unittest.TestCase):
         self.assertNotIn("## Generic workers", skill)
         self.assertIn("## Active roles", skill)
         self.assertIn("## Model rules", skill)
+        # Without the guides (a role workflow kept from an earlier release) the opening does not claim them.
+        opening, other = ((role_profile.PLAYBOOK_OPENING, role_profile.ROLES_OPENING) if guides
+                          else (role_profile.ROLES_OPENING, role_profile.PLAYBOOK_OPENING))
+        self.assertIn(opening, skill)
+        self.assertNotIn(other, skill)
         for line in playbook.rule_lines(name):
             self.assertIn(line, skill)
         self.assertEqual("## Agent playbook" in skill, guides)
@@ -143,9 +234,18 @@ class InstalledWorkflowTests(Home):
         self.assertIn("| reviewer1 |", self.skill("codex"))
         self.assertEqual(json.loads(path.read_text()), rows)
         self.commit("playbook")
+        result = self.prepare("codex-only")
+        self.assertIn(f"T3 Boat: {path}: select a different model for reviewer1", result.stderr)
+        self.assertIn("run t3-boat setup with T3_BOAT_PROFILE=codex-only to complete it", result.stderr)
+        self.assertNotIn("defaultModelSelection", self.startup_settings())
+        self.assertNotIn("BEGIN t3-boat", self.note("codex"))
+        self.assertEqual(json.loads(path.read_text()), rows)
+        # An installation kept from an earlier release chose nothing, so it is still refused there.
+        playbook_skills.workflow_path(self.home).unlink()
         result = self.prepare("codex-only", check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("reviewer1", result.stderr)
+        self.assertEqual(result.stderr.strip(),
+                         f"T3 Boat profile: {path}: select a different model for reviewer1; executor uses codex sol")
 
     def test_generic_profile_without_a_lead_row_is_refused(self):
         self.commit("generic")
@@ -243,40 +343,10 @@ class InstalledWorkflowTests(Home):
         self.assertEqual(json.loads(before), rows)
 
 
-EFFORTS = ["low", "medium", "high", "xhigh"]
-MODELS = {"codex": {"gpt-6.2-sol": EFFORTS, "gpt-6.2-astra": EFFORTS, "gpt-6.2-luna": EFFORTS}}
 
 
 class SetupCommitTests(Home):
     """Setup applies the workflow answer together with the instructions it selects, or not at all."""
-
-    def setup_run(self, *answers, catalog=MODELS):
-        replies = iter(answers)
-
-        def answer(prompt):
-            print(prompt)
-            try:
-                reply = next(replies)
-            except StopIteration:
-                raise EOFError() from None
-            if isinstance(reply, BaseException):
-                raise reply
-            return reply
-
-        stdin = MagicMock()
-        stdin.isatty.return_value = True
-        # Setup stops at the Boat login, after the workflow and models are applied.
-        with patch.dict(os.environ, HOME=str(self.home)), patch("builtins.input", answer), \
-                patch.object(cli, "t3_online", return_value=True), patch.object(cli, "logged_in", return_value=True), \
-                patch.object(cli, "probe", return_value=None), \
-                patch.object(cli, "run", side_effect=cli.SetupError("Boat login is incomplete.")), \
-                patch.object(role_picker, "catalog", return_value=catalog), patch.object(cli.sys, "stdin", stdin), \
-                redirect_stdout(StringIO()) as out:
-            try:
-                cli.setup("codex-only", ("codex",))
-            except (Exception, KeyboardInterrupt) as error:  # An interrupt is under test.
-                return error, out.getvalue()
-        return None, out.getvalue()
 
     def upgraded(self):
         """An installation that an earlier release set up with the role workflow and no guides."""
@@ -351,41 +421,211 @@ class SetupCommitTests(Home):
         self.assertIn("asks nothing and keeps it", out.getvalue())
 
 
+class Interrupted(KeyboardInterrupt):
+    """The process stops at an injected point, as Ctrl-C or a killed container would stop it."""
+
+
+class CommitRecoveryTests(Home):
+    """An accepted setup writes several files. Stopping it at any of them must never leave a state that the next
+    container start, setup or worker command rejects: the commit is finished, or nothing changed."""
+
+    def commit_rows(self, name, rows, workflow, stop_at=None):
+        """Apply an accepted setup in this process, stopping before write number `stop_at`; return the writes."""
+        real, calls = role_profile.write, []
+
+        def write(path, data):
+            if len(calls) == stop_at:
+                raise Interrupted()
+            calls.append(path)
+            real(path, data)
+
+        with patch.dict(os.environ, HOME=str(self.home)), patch.object(role_profile, "write", write), \
+                redirect_stdout(StringIO()):
+            try:
+                role_profile.prepare(name, rows, workflow)
+            except Interrupted:
+                self.assertIsNotNone(stop_at)
+        return calls
+
+    def scenario(self, before, name, after, workflow):
+        """Snapshots after a restart: without the commit, and with it applied in full."""
+        self.reset()
+        before(self)
+        self.prepare(name)
+        old = self.snapshot()
+        writes = self.commit_rows(name, after(self, name), workflow)
+        self.prepare(name)
+        new = self.snapshot()
+        self.assertNotEqual(old, new)
+        self.assertFalse(role_profile.journal_path(self.home).exists())
+        self.assertEqual(playbook_skills.workflow(self.home), workflow)
+        return old, new, len(writes)
+
+    SCENARIOS = (
+        # A fresh volume choosing generic workers: the lead-only profile and the guide answer come before the
+        # workflow, so stopping between them used to leave a lead-only profile in the role workflow.
+        ("fresh to generic", lambda self: None, lambda self, n: rows_for(n, only_lead=True), "generic"),
+        ("generic to playbook", lambda self: (self.commit("generic"), lead_only(self.home, "codex+claude")),
+         lambda self, n: rows_for(n), "playbook"),
+        ("playbook to generic", lambda self: (self.commit("playbook"), seeded_roles(self.home, "codex+claude")),
+         lambda self, n: {**rows_for(n), "lead": dict(rows_for(n)["scout"])}, "generic"),
+        ("earlier release to playbook", lambda self: seeded_roles(self.home, "codex+claude"),
+         lambda self, n: rows_for(n), "playbook"),
+    )
+
+    def run_scenario(self, label, before, after, workflow, name):
+        old, new, total = self.scenario(before, name, after, workflow)
+        self.assertGreater(total, 4)
+        for stop_at in range(total):
+            with self.subTest(scenario=label, profile=name, stop_at=stop_at):
+                self.reset()
+                before(self)
+                self.prepare(name)
+                rows = after(self, name)
+                self.commit_rows(name, rows, workflow, stop_at)
+                # Nothing is written before the record of the accepted choice; after it, a restart finishes it.
+                self.assertEqual(role_profile.journal_path(self.home).exists(), stop_at > 0)
+                self.prepare(name)
+                self.assertEqual(self.snapshot(), new if stop_at else old)
+
+    def test_every_interruption_of_a_commit_is_finished_or_undone_by_a_restart(self):
+        for label, before, after, workflow in self.SCENARIOS:
+            for name in (PROFILES if label == "fresh to generic" else ("codex+claude",)):
+                self.run_scenario(label, before, after, workflow, name)
+
+    def test_staged_switches_each_interrupted_end_in_the_last_choice(self):
+        name = "codex+claude"
+        stages = (("generic", lambda: rows_for(name, only_lead=True)), ("playbook", lambda: rows_for(name)),
+                  ("generic", lambda: {"lead": dict(rows_for(name)["scout"])}))
+        # The clean result of the same three choices, for comparison.
+        self.prepare(name)
+        for workflow, rows in stages:
+            self.commit_rows(name, rows(), workflow)
+        self.prepare(name)
+        expected = self.snapshot()
+        for stop_at in range(1, 12):
+            with self.subTest(stop_at=stop_at):
+                self.reset()
+                self.prepare(name)
+                # Every choice but the last stops part way; the next one first finishes the one before it.
+                for workflow, rows in stages[:-1]:
+                    self.commit_rows(name, rows(), workflow, stop_at)
+                self.commit_rows(name, stages[-1][1](), stages[-1][0])
+                self.prepare(name)
+                self.assertEqual(self.snapshot(), expected)
+
+    def test_setup_and_workers_finish_an_interrupted_commit_without_a_restart(self):
+        self.prepare("codex-only")
+        rows = rows_for("codex-only", only_lead=True)
+        writes = [path.relative_to(self.home) for path in self.commit_rows("codex-only", rows, "generic")]
+        self.reset()
+        project = self.stub()
+        self.prepare("codex-only")
+        # Stop just before the workflow file, after the lead-only profile and the guide answer are written.
+        self.commit_rows("codex-only", rows, "generic", writes.index(playbook_skills.WORKFLOW))
+        self.assertEqual(playbook_skills.state_path(self.home).read_text(), "no\n")
+        self.assertEqual(json.loads((self.home / "profiles/codex-only.json").read_text()), rows)
+        result, calls = self.start(project, "codex-only")
+        self.assertIn("for a generic worker", result.stdout)  # Not refused as an incomplete role profile.
+        self.assertEqual(calls[-1], ["delete", "--yes", "bx_1"])
+        self.assertEqual(playbook_skills.workflow_path(self.home).read_text(), "generic\n")
+        self.assertFalse(role_profile.journal_path(self.home).exists())
+        self.assertGeneric(self.skill("codex"))
+
+        # The same stop during setup itself: the next setup finishes it and offers it as the current workflow.
+        self.reset()
+        self.prepare("codex-only")
+        real = role_profile.write
+
+        def write(path, data):
+            if path == playbook_skills.workflow_path(self.home):
+                raise Interrupted()
+            real(path, data)
+
+        with patch.object(role_profile, "write", write):
+            error, _ = self.setup_run("", "")
+        self.assertIsInstance(error, Interrupted)
+        self.assertTrue(role_profile.journal_path(self.home).exists())
+        error, output = self.setup_run("", "", "")
+        self.assertIsInstance(error, cli.SetupError)
+        self.assertIn("Finished applying the models and workflow accepted in an interrupted setup.", output)
+        self.assertIn("Workflow [generic]", output)
+        self.assertIn("your saved workflow", output)
+        self.assertEqual(playbook_skills.workflow(self.home), "generic")
+
+    def test_an_unreadable_commit_record_names_itself(self):
+        journal = role_profile.journal_path(self.home)
+        journal.parent.mkdir(parents=True)
+        journal.write_text("{\"profile\": 1}")
+        result = self.prepare("codex-only", check=False)
+        self.assertEqual(result.stderr.strip(), f"T3 Boat profile: {journal}: not a record of an interrupted setup; "
+                                                "delete it and rerun t3-boat setup")
+
+
+class ProfileSwitchTests(Home):
+    """The workflow is one setting for the machine; each T3_BOAT_PROFILE keeps its own rows."""
+
+    def test_every_profile_left_behind_by_another_profiles_switch_is_recovered(self):
+        for stranded in PROFILES:
+            for switcher in PROFILES:
+                if switcher == stranded:
+                    continue
+                with self.subTest(stranded=stranded, switcher=switcher):
+                    self.reset()
+                    path = self.home / "profiles" / (stranded + ".json")
+                    # A generic setup under one profile saved only its lead row...
+                    self.commit("generic")
+                    rows = lead_only(self.home, stranded)
+                    saved = path.read_bytes()
+                    # ...then setup under another profile chose the role playbook for the whole machine.
+                    error, output = self.setup_run("playbook", "", "", profile=switcher)
+                    self.assertIsInstance(error, cli.SetupError)
+                    self.assertEqual(playbook_skills.workflow(self.home), "playbook")
+                    self.assertIn(f"Note: {path} does not fit the playbook workflow yet. Run setup with "
+                                  f"T3_BOAT_PROFILE={stranded}", output)
+                    self.assertEqual(path.read_bytes(), saved)
+                    # Starting the left-behind profile runs T3 without applying it, instead of failing.
+                    result = self.prepare(stranded)
+                    self.assertIn(f"T3 Boat: {path}: expected roles", result.stderr)
+                    self.assertIn(f"run t3-boat setup with T3_BOAT_PROFILE={stranded} to complete it", result.stderr)
+                    self.assertNotIn("defaultModelSelection", self.startup_settings())
+                    self.assertEqual(path.read_bytes(), saved)
+                    with patch.dict(os.environ, HOME=str(self.home)), self.assertRaises(cli.ProfileError) as status:
+                        cli.parent_role(stranded)
+                    self.assertIn(f"T3_BOAT_PROFILE={stranded}", str(status.exception))
+                    # Its setup reaches the picker, keeps the saved lead row and suggests the missing roles.
+                    error, output = self.setup_run("", "", "", profile=stranded)
+                    self.assertIsInstance(error, cli.SetupError, output)
+                    self.assertIn("Setup keeps its saved rows and suggests the missing ones", output)
+                    completed = json.loads(path.read_text())
+                    self.assertEqual(completed["lead"], rows["lead"])
+                    self.assertEqual(set(completed), set(playbook.role_keys()))
+                    self.prepare(stranded)
+                    self.assertEqual(self.startup_settings()["defaultModelSelection"]["model"], rows["lead"]["model"])
+                    for provider in playbook.providers(stranded):
+                        self.assertRoles(self.skill(provider), stranded, guides=True)
+
+    def test_a_left_behind_profile_can_also_choose_generic_workers_again(self):
+        self.commit("playbook")
+        rows = lead_only(self.home, "codex-only")
+        error, _ = self.setup_run("generic", "", "")
+        self.assertIsInstance(error, cli.SetupError)
+        self.assertEqual(json.loads((self.home / "profiles/codex-only.json").read_text()), rows)
+        self.assertEqual(playbook_skills.workflow(self.home), "generic")
+        self.assertGeneric(self.skill("codex"))
+
+    def test_an_earlier_installation_still_refuses_an_incomplete_profile_before_sign_in(self):
+        rows = seeded_roles(self.home, "codex-only")
+        del rows["arbiter"]
+        path = self.home / "profiles/codex-only.json"
+        path.write_text(json.dumps(rows))
+        error, output = self.setup_run("", "")
+        self.assertIsInstance(error, cli.ProfileError)
+        self.assertEqual(str(error), f"{path}: expected roles {', '.join(playbook.role_keys())}; missing arbiter")
+        self.assertNotIn("Workflow [", output)
+
+
 class WorkerTests(Home):
-    def stub(self, ssh_status=9):
-        project = self.home / "project"
-        project.mkdir(exist_ok=True)
-        for command in (["git", "init", "-q"], ["git", "config", "remote.origin.url", "https://github.com/sample/repo.git"],
-                        ["git", "config", "boat.environment", "team"]):
-            subprocess.run(command, cwd=project, env=self.env, check=True)
-        boat = self.home / "boat"
-        boat.write_text(f"""#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-a = sys.argv[1:]
-home = Path(os.environ['HOME'])
-with (home/'calls').open('a') as f: f.write(json.dumps(a)+'\\n')
-if a[0] == 'new': print(json.dumps({{'event':'ready','id':'bx_1'}}))
-elif a[0] == 'ssh': sys.exit({ssh_status})
-elif a[0] == 'delete' and '--json' in a:
-    print(json.dumps({{'operation':{{'id':'bdop_1','targetId':'bx_1','kind':'sandbox','status':'completed'}}}}))
-elif a[0] != 'delete': sys.exit(10)
-""")
-        boat.chmod(0o755)
-        return project
-
-    def run_worker(self, project, profile, *args):
-        (self.home / "calls").unlink(missing_ok=True)
-        env = self.env | {"PATH": str(self.home) + ":" + self.env["PATH"], "T3_BOAT_PROFILE": profile}
-        result = subprocess.run([ROOT / "bin/boat-worker", *args], cwd=project, env=env,
-                                text=True, capture_output=True)
-        recorded = self.home / "calls"
-        calls = [json.loads(line) for line in recorded.read_text().splitlines()] if recorded.exists() else []
-        return result, calls
-
-    def start(self, project, profile, *role):
-        return self.run_worker(project, profile, "start", *role)
-
     def tools(self):
         tools = self.home / "tools"
         tools.mkdir()
@@ -529,6 +769,52 @@ elif a[0] != 'delete': sys.exit(10)
         result, calls = self.start(project, "codex-only")
         self.assertIn("Run t3-boat setup with a GitHub URL", result.stderr)
         self.assertEqual(calls, [])
+
+    def probes(self, profile):
+        project = self.stub(ssh_status=0)
+        result, _ = self.run_worker(project, profile, "verify", "team")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [line.removeprefix("[ok] ") for line in result.stdout.splitlines() if "subscription reply" in line]
+
+    def test_generic_check_probes_the_lead_and_cli_defaults_never_presets(self):
+        self.commit("generic")
+        for name in PROFILES:
+            with self.subTest(profile=name):
+                rows = seeded_roles(self.home, name)
+                # A preset of the lead's provider with another model than the lead's.
+                for key, row in rows.items():
+                    if key != "lead" and row["provider"] == rows["lead"]["provider"]:
+                        row["model"] = "preset-" + key
+                (self.home / "profiles" / (name + ".json")).write_text(json.dumps(rows))
+                lead = rows["lead"]
+                expected = [f"{p} subscription reply ({lead['model']} / {lead['effort']})" if p == lead["provider"]
+                            else f"{p} subscription reply (CLI default)" for p in playbook.providers(name)]
+                self.assertEqual(self.probes(name), expected)
+
+    def test_role_workflows_check_the_executor_as_earlier_releases_did(self):
+        for workflow in ("playbook", "roles"):
+            for name in PROFILES:
+                with self.subTest(workflow=workflow, profile=name):
+                    self.reset()
+                    self.commit(workflow)
+                    rows = seeded_roles(self.home, name)
+                    expected = []
+                    for provider in playbook.providers(name):
+                        row = next(r for r in (rows["executor"], *rows.values()) if r["provider"] == provider)
+                        expected.append(f"{provider} subscription reply ({row['model']} / {row['effort']})")
+                    self.assertEqual(self.probes(name), expected)
+
+    def test_check_receipts_name_what_was_checked(self):
+        env, credential = {"id": "env1", "version": 3}, "creds"
+        rows = seeded_roles(self.home, "codex-only")
+        with patch.dict(os.environ, HOME=str(self.home)):
+            legacy = cli.hashlib.sha256(json.dumps([rows, "env1", 3, credential], sort_keys=True).encode()).hexdigest()
+            self.assertEqual(cli.check_signature("codex-only", env, credential), legacy)  # Earlier receipts hold.
+            self.commit("generic")
+            self.assertNotIn(cli.check_signature("codex-only", env, credential), (legacy, None))
+            lead_only(self.home, "codex-only")
+            self.commit("playbook")
+            self.assertIsNone(cli.check_signature("codex-only", env, credential))
 
     def test_setup_check_uses_the_lead_model_of_a_generic_profile(self):
         project = self.stub(ssh_status=0)

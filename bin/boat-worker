@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import playbook_skills
-from role_profile import PARENT, PROVIDERS, OPTION, read_profile, uses_roles
+from role_profile import PARENT, PROVIDERS, OPTION, read_profile, recover, uses_roles
 
 
 def output(*args):
@@ -234,9 +234,25 @@ def delete_check_vm(vm):
         time.sleep(2)
 
 
+def probe_rows(roles, profile, workflow):
+    """The row whose model checks each provider's subscription, or None for the provider CLI's default.
+
+    Generic workers open with the lead's model, so it checks the lead's provider; a generic worker also enables
+    the profile's other providers, which the CLI default checks. Any other saved row is only a preset and is not
+    probed. A role workflow checks the executor's model, then any row of that provider, as earlier releases did.
+    """
+    if not uses_roles(workflow):
+        lead = roles[PARENT]
+        return {provider: lead if lead["provider"] == provider else None for provider in PROVIDERS[profile]}
+    return {provider: next((r for r in (roles["executor"], *roles.values()) if r["provider"] == provider), None)
+            for provider in PROVIDERS[profile]}
+
+
 def verify(environment, slug=None):
     profile = os.environ["T3_BOAT_PROFILE"]
-    roles = read_profile(profile)
+    recover(profile)
+    workflow = playbook_skills.workflow(Path.home())
+    roles = read_profile(profile, workflow)
     if slug and not re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", slug):
         raise ValueError("Expected a GitHub owner/repository")
     vm = provision("t3-check-" + uuid.uuid4().hex[:12], environment)
@@ -259,10 +275,7 @@ def verify(environment, slug=None):
                   + shlex.join(["ls-remote", "https://github.com/" + slug + ".git", "HEAD"]),
                   f"Git read access to {slug}")
         prompt = "Reply with exactly BOAT_OK. Do not use tools."
-        # Prefer the executor's model, then the lead's (a generic profile may hold only the lead row).
-        preferred = [roles[key] for key in ("executor", PARENT) if key in roles]
-        for provider in PROVIDERS[profile]:
-            role = next((r for r in (*preferred, *roles.values()) if r["provider"] == provider), None)
+        for provider, role in probe_rows(roles, profile, workflow).items():
             if provider == "codex":
                 args = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", "reply"]
                 if role:
@@ -293,6 +306,7 @@ def start(role_name=None):
     split its work, which the roles do not allow.
     """
     profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
+    recover(profile)
     workflow = playbook_skills.workflow(Path.home())
     roles = read_profile(profile, workflow)
     children = ", ".join(key for key in roles if key != PARENT)

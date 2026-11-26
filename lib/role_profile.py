@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Apply one Docker installation's editable role table before starting T3."""
+import fcntl
 import json
 import os
 import re
 import stat
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -20,6 +22,16 @@ OPTION = {"codex": "reasoningEffort", "claudeAgent": "effort"}
 MISSING = object()  # A saved profile that does not exist, as opposed to one holding JSON null.
 BEGIN = "<!-- BEGIN t3-boat -->"
 END = "<!-- END t3-boat -->"
+# A setup whose models were accepted but whose files may not all be written yet (relative to the home directory).
+JOURNAL = Path("profiles/setup-pending")
+
+
+# The opening of playbook.md, and its replacement for an installation that kept the role workflow of an
+# earlier release, which has the same roles and rules but no agent-playbook guides installed.
+PLAYBOOK_OPENING = "The owner chose the agent-playbook role workflow for this machine, so every project follows its roles."
+ROLES_OPENING = ("This machine keeps the role workflow of an earlier t3-boat release, so every project follows the "
+                 "agent-playbook roles. The agent-playbook role guides are not installed here: brief each worker with "
+                 "its role, its inputs and the deliverable that the steps below name.")
 
 
 def write(target, content):
@@ -104,6 +116,34 @@ class ProfileError(ValueError):
     """A problem with a file the user can repair; reported as one line."""
 
 
+class IncompleteProfile(ProfileError):
+    """A profile valid for generic workers that lacks rows or rule-abiding models for this machine's role workflow.
+
+    The workflow is one setting for the machine, but each T3_BOAT_PROFILE keeps its own rows, so setup under one
+    profile can choose a role workflow that another profile's saved rows do not yet fit. Setup completes it,
+    keeping its rows; until then T3 starts without applying it.
+    """
+
+
+def incomplete(name, rows, workflow, home=None):
+    """Whether `rows` fit generic workers but not the role workflow that setup chose for this machine.
+
+    An installation kept from an earlier release has chosen nothing (no workflow file), so its profiles are
+    still refused as they were then.
+    """
+    if not uses_roles(workflow) or not playbook_skills.workflow_path(home or Path.home()).exists():
+        return False
+    try:
+        validate_profile(name, rows, "generic")
+    except ProfileError:
+        return False
+    try:
+        validate_profile(name, rows, workflow)
+    except ProfileError:
+        return True
+    return False
+
+
 def profile_present(target):
     """Return whether a saved profile exists; anything there that cannot be read as a file names itself."""
     try:
@@ -145,6 +185,9 @@ def read_profile(name, workflow=None):
     try:
         return validate_profile(name, rows, workflow)
     except ProfileError as exc:  # Anything else is a defect and keeps its traceback.
+        if incomplete(name, rows, workflow):
+            raise IncompleteProfile(f"{target}: {exc}; this machine uses the {workflow} workflow, so run t3-boat "
+                                    f"setup with T3_BOAT_PROFILE={name} to complete it (its saved rows are kept)") from exc
         raise ProfileError(f"{target}: {exc}") from exc
 
 
@@ -162,14 +205,80 @@ def instructions(path, content):
     return previous + ("\n\n" if previous else "") + block + "\n"
 
 
+def journal_path(home):
+    return Path(home) / JOURNAL
+
+
+@contextmanager
+def state_lock(home):
+    """Serialize every change to the saved state and the files generated from it."""
+    with (Path(home) / ".t3-boat-state.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def pending(home):
+    """The accepted setup that an interruption left unfinished, or None."""
+    path = journal_path(home)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ProfileError(f"{path}: cannot be read: {error.strerror or error}") from None
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        record = None
+    if (not isinstance(record, dict) or record.get("profile") not in PROVIDERS
+            or record.get("workflow") not in (*playbook_skills.WORKFLOWS, None)
+            or not isinstance(record.get("rows"), (dict, type(None)))):
+        raise ProfileError(f"{path}: not a record of an interrupted setup; delete it and rerun t3-boat setup")
+    return record
+
+
+def finish(home, record):
+    """Commit an interrupted setup's accepted choice: the profile rows, then the workflow, then drop the record."""
+    if record["rows"] is not None:
+        write(Path(home) / "profiles" / (record["profile"] + ".json"), json.dumps(record["rows"], indent=2) + "\n")
+    if record["workflow"] is not None:
+        for path, data in playbook_skills.state_files(home, record["workflow"]).items():
+            write(path, data)
+    journal_path(home).unlink(missing_ok=True)
+
+
+def recover(name):
+    """Finish a setup that was interrupted after its models were accepted, and regenerate the files it was
+    writing. Returns whether there was one. Every entry point that reads the saved state calls this first."""
+    home = Path.home()
+    with state_lock(home):
+        record = pending(home)
+        if record is None:
+            return False
+        finish(home, record)
+        _prepare(name)
+        return True
+
+
 def prepare(name, rows=None, workflow=None):
     """Write the T3 settings and instructions for this machine's workflow.
 
-    Setup passes the rows and the workflow the owner chose; both are saved with the instructions, and the
-    workflow is committed last, so an interrupted or failed setup leaves the earlier workflow and its files.
-    A container start passes neither and regenerates everything from the saved state.
+    Setup passes the rows and the workflow the owner chose. Everything is computed and checked first, then
+    one record of the choice is written (the commit point), then the files, then the workflow, and the record
+    is removed. An interruption before the record leaves every file as it was; after it, the next start, setup
+    or boat-worker command finishes the commit (see recover). A container start passes neither and regenerates
+    everything from the saved state.
     """
     check_profile_name(name)
+    home = Path.home()
+    with state_lock(home):
+        record = pending(home)
+        if record is not None:
+            finish(home, record)
+        _prepare(name, rows, workflow)
+
+
+def _prepare(name, rows=None, workflow=None):
     home = Path.home()
     role_path = home / "profiles" / (name + ".json")
     save_selection = rows is not None
@@ -178,7 +287,10 @@ def prepare(name, rows=None, workflow=None):
     if workflow not in playbook_skills.WORKFLOWS:
         raise ValueError(f"Unknown workflow {workflow!r}")
     if rows is None and profile_present(role_path):
-        rows = read_profile(name, workflow)
+        try:
+            rows = read_profile(name, workflow)
+        except IncompleteProfile as exc:  # T3 must run so that setup can complete it.
+            print(f"T3 Boat: {exc}. T3 starts without a model profile until then.", file=sys.stderr)
     enabled = PROVIDERS[name]
     settings_path = Path(os.environ.get("T3CODE_HOME") or home / ".t3") / "userdata/settings.json"
     raw = settings_path.read_bytes() if settings_path.exists() else b"{}"
@@ -207,8 +319,12 @@ def prepare(name, rows=None, workflow=None):
     # Generic workers unless the owner chose a role workflow; the shared part (machine boundary, parent
     # updates, cleanup) is in every workflow.
     roles_mode = uses_roles(workflow)
-    policy = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip() + "\n\n" + (
-        ROOT / "skills/t3-boat" / ("playbook.md" if roles_mode else "generic.md")).read_text()
+    workflow_text = (ROOT / "skills/t3-boat" / ("playbook.md" if roles_mode else "generic.md")).read_text()
+    if workflow == "roles":  # Kept from an earlier release: the same roles, without the agent-playbook guides.
+        if PLAYBOOK_OPENING not in workflow_text:
+            raise RuntimeError("skills/t3-boat/playbook.md lacks its opening sentence")
+        workflow_text = workflow_text.replace(PLAYBOOK_OPENING, ROLES_OPENING)
+    policy = (ROOT / "skills/t3-boat/SKILL.md").read_text().rstrip() + "\n\n" + workflow_text
     if roles_mode:
         table = ["## Active roles", "", "| Role | Provider | Model | Option |", "| --- | --- | --- | --- |"]
     else:
@@ -252,14 +368,19 @@ def prepare(name, rows=None, workflow=None):
     updates[settings_path] = json.dumps(settings, indent=2) + "\n"
     # A provider's child shell may omit custom environment variables.
     updates[home / "profiles/active"] = name + "\n"
+    if save_selection or commit:
+        # The commit point. Until it is written nothing has changed; after it, recover() finishes the rest.
+        write(journal_path(home), json.dumps({"profile": name, "workflow": workflow if commit else None,
+                                              "rows": rows if save_selection else None}, indent=2) + "\n")
     if save_selection:
         updates[role_path] = json.dumps(rows, indent=2) + "\n"
     for path, data in updates.items():
         write(path, data)
     playbook_skills.remove(stale_skills)
-    if commit:  # Last: until this point the earlier workflow and its files stay in effect.
+    if commit:  # Last among the saved state: the workflow selects how the other files are read.
         for path, data in playbook_skills.state_files(home, workflow).items():
             write(path, data)
+    journal_path(home).unlink(missing_ok=True)
     for path in kept:
         print(f"T3 Boat: kept your own {path}; it has no t3-boat marker, so it is used in place of the "
               "agent-playbook guide.", file=sys.stderr)

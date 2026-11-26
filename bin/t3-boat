@@ -180,10 +180,9 @@ def parent_role(profile):
     if rows is MISSING:
         raise SetupError("The global role profile could not be read. Check docker logs t3-boat.")
     try:
-        role_profile.check_roles(rows, playbook_skills.workflow(Path.home()))
-    except role_profile.ProfileError as error:
-        raise ProfileError(f"{path}: {error}") from None
-    return rows[PARENT]
+        return read_profile(profile)[PARENT]
+    except role_profile.ProfileError as error:  # The message names the file, and setup when setup completes it.
+        raise ProfileError(str(error)) from None
 
 
 def receipt_path(profile, slug):
@@ -200,8 +199,32 @@ def read_receipt(profile, slug):
 
 
 def check_signature(profile, env, credential):
-    config = [read_profile(profile), env["id"], env.get("version"), credential]
+    """What a VM check covered, or None for a profile that cannot be applied, which no check covers."""
+    try:
+        config = [read_profile(profile), env["id"], env.get("version"), credential]
+    except role_profile.ProfileError:
+        return None
+    # Generic workers check the lead's model; a role workflow checks the executor's, as earlier releases did,
+    # so their receipts stay valid.
+    if not role_profile.uses_roles(playbook_skills.workflow(Path.home())):
+        config.append("generic")
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+
+
+def incomplete_profiles(workflow, current):
+    """The other saved profiles whose rows the chosen workflow does not fit yet, as (name, path) pairs."""
+    found = []
+    for name in PROFILES:
+        path = Path.home() / "profiles" / (name + ".json")
+        if name == current:
+            continue
+        try:
+            rows = saved_rows(path, missing=MISSING)
+            if rows is not MISSING:
+                role_profile.validate_profile(name, rows, workflow)
+        except ValueError:
+            found.append((name, path))
+    return found
 
 
 def project_binding(git_dir):
@@ -260,6 +283,8 @@ def choose_workflow(providers):
 def setup(profile, providers):
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
+    if role_profile.recover(profile):
+        print("Finished applying the models and workflow accepted in an interrupted setup.")
     # Name an unreadable or incomplete saved profile before installing anything or asking for a sign-in.
     path = Path.home() / "profiles" / (profile + ".json")
     try:
@@ -267,10 +292,15 @@ def setup(profile, providers):
     except OSError as error:
         raise ProfileError(f"{path}: {error.strerror or error}") from None
     if rows is not MISSING:
+        workflow = playbook_skills.workflow(Path.home())
         try:
-            role_profile.check_roles(rows, playbook_skills.workflow(Path.home()))
+            role_profile.check_roles(rows, workflow)
         except role_profile.ProfileError as error:
-            raise ProfileError(f"{path}: {error}") from None
+            # Rows saved for generic workers before another profile's setup chose a role workflow: the picker
+            # shows them and suggests the missing rows. Any other incomplete profile is refused, as before.
+            if not role_profile.incomplete(profile, rows, workflow):
+                raise ProfileError(f"{path}: {error}") from None
+            print(f"{path}: {error}. Setup keeps its saved rows and suggests the missing ones.")
     for provider in providers:
         if provider == "claude":
             run("install-claude")
@@ -282,7 +312,11 @@ def setup(profile, providers):
                 run("claude", "auth", "login")
             if not logged_in(provider):
                 raise SetupError(f"A {provider} subscription login is required. Rerun setup to resume.")
-    configure_roles(profile, choose_workflow(providers))
+    workflow = choose_workflow(providers)
+    configure_roles(profile, workflow)
+    for name, other in incomplete_profiles(workflow, profile):
+        print(f"Note: {other} does not fit the {workflow} workflow yet. Run setup with T3_BOAT_PROFILE={name} "
+              "before you use that profile; it keeps the saved rows and asks for the rest.")
     existing = projects()
     optional = " (Enter to resume existing projects)" if existing else " (Enter to start with an idea)"
     url = input(f"GitHub repository URL{optional}: ").strip()
@@ -343,9 +377,15 @@ def status(profile, providers):
             failures.append(label)
 
     report("T3 HTTP server", t3_online())
-    print("Workflow: " + WORKFLOW_LABELS[playbook_skills.workflow(Path.home())])
     problem = None
     try:
+        role_profile.recover(profile)
+    except role_profile.ProfileError as error:
+        problem = error
+    print("Workflow: " + WORKFLOW_LABELS[playbook_skills.workflow(Path.home())])
+    try:
+        if problem:
+            raise ProfileError(str(problem))
         lead = parent_role(profile)
         t3_home = Path(os.environ.get("T3CODE_HOME") or Path.home() / ".t3")
         settings = json.loads((t3_home / "userdata/settings.json").read_text())
@@ -384,9 +424,10 @@ def status(profile, providers):
                 env = env_for(envs, label)
                 credential = check_access(env, profiles, providers)
                 record = read_receipt(profile, slug)
+                signature = check_signature(profile, env, credential)
                 report(f"{env['name']}: last successful VM check for {slug or profile} "
                        f"({record.get('checked', 'never')})",
-                       record.get("signature") == check_signature(profile, env, credential))
+                       signature is not None and record.get("signature") == signature)
                 if slug:
                     report(f"{slug} attached to {env['name']}", has_repo(env, slug))
             except SetupError as error:
