@@ -254,14 +254,19 @@ def finish(home, record):
 def recover(name):
     """Finish a setup that was interrupted after its models were accepted, and regenerate the files it was
     writing. Returns whether there was one. Every entry point that reads the saved state calls this first."""
+    with state_lock(Path.home()):
+        return recover_locked(name)
+
+
+def recover_locked(name):
+    """recover() for a caller that already holds state_lock, so that it reads the state it recovered."""
     home = Path.home()
-    with state_lock(home):
-        record = pending(home)
-        if record is None:
-            return False
-        finish(home, record)
-        _prepare(name)  # Regenerates every file for the active profile, then removes the record.
-        return True
+    record = pending(home)
+    if record is None:
+        return False
+    finish(home, record)
+    _prepare(name)  # Regenerates every file for the active profile, then removes the record.
+    return True
 
 
 def prepare(name, rows=None, workflow=None):

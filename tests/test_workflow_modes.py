@@ -2,14 +2,16 @@
 role workflow that an installation set up by an earlier release keeps."""
 import json
 import os
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from importlib.machinery import SourceFileLoader
 from io import StringIO
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+import fcntl
 from unittest.mock import MagicMock, patch
 
 from profile_fixtures import seeded_roles
@@ -966,6 +968,147 @@ class WorkerTests(Home):
         self.assertEqual(len(replies), 2)
         self.assertIn(f"codex subscription reply ({rows['lead']['model']} / {rows['lead']['effort']})", result.stdout)
         self.assertIn("claudeAgent subscription reply (CLI default)", result.stdout)  # No row selects a Claude model.
+
+
+class ConcurrentStartTests(Home):
+    """boat-worker start reads the profile, its rows, the workflow and the guide under the state lock, so a setup
+    that commits a new choice meanwhile is seen whole or not at all, never as new rows with the old workflow."""
+
+    WAIT = 30  # Seconds; only a deadlock or a missing lock reaches it.
+
+    def setUp(self):
+        super().setUp()
+        self.project = self.stub()
+        with patch.dict(os.environ, HOME=str(self.home)), redirect_stdout(StringIO()):
+            self.old = rows_for("codex-only")
+            role_profile.prepare("codex-only", self.old, "playbook")
+        # The new choice is valid under both workflows, so a launch that mixed them would not be refused.
+        self.new = json.loads(json.dumps(self.old))
+        self.new["executor"]["effort"] = "xhigh"
+        role_profile.validate_profile("codex-only", self.new, "playbook")
+        self.blocked = {}  # Thread name -> an Event set when that thread found the state lock held.
+        # paused: the setup has written its rows and waits before its workflow file. arrived: the setup either
+        # paused there or found the state lock held, whichever happens first.
+        self.paused, self.resume, self.arrived = threading.Event(), threading.Event(), threading.Event()
+        self.errors, self.launched = [], []
+
+    def run_in(self, name, target):
+        def body():
+            try:
+                target()
+            except BaseException as error:  # Reported by the test thread.
+                self.errors.append((name, error))
+        self.blocked[name] = threading.Event()
+        thread = threading.Thread(target=body, name=name, daemon=True)
+        thread.start()
+        return thread
+
+    def setup_commit(self):
+        role_profile.prepare("codex-only", self.new, "generic")
+
+    def launch(self):
+        self.assertIsNone(worker.start("executor"))
+
+    def complete(self, rows, workflow):
+        """What one complete state installs on an executor: its model row, providers and instructions."""
+        if workflow == "playbook":  # Read while the home still holds the playbook workflow.
+            note = playbook_skills.worker_guide(self.home, "executor")
+            self.assertIn("agent-playbook", note)
+        else:
+            note = worker.WORKER_NOTE
+        return rows["executor"], None, note
+
+    def harness(self, before_workflow_read=None):
+        """Patches: the setup thread pauses between its rows and its workflow file, each thread reports finding
+        the state lock held, and the worker records what it would install instead of using a VM."""
+        real_write, real_flock, real_workflow = role_profile.write, fcntl.flock, playbook_skills.workflow
+
+        def write(path, data):
+            if threading.current_thread().name == "setup" and path == playbook_skills.workflow_path(self.home):
+                self.paused.set()
+                self.arrived.set()
+                self.assertTrue(self.resume.wait(self.WAIT), "setup was never resumed")
+            real_write(path, data)
+
+        def flock(fd, operation):
+            event = self.blocked.get(threading.current_thread().name)
+            if event is not None and operation == fcntl.LOCK_EX:
+                try:
+                    return real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    event.set()
+                    if threading.current_thread().name == "setup":
+                        self.arrived.set()
+            return real_flock(fd, operation)
+
+        hook = [before_workflow_read] if before_workflow_read else []
+
+        def workflow(home):
+            if threading.current_thread().name == "launch" and hook:
+                hook.pop()()  # Only at the launch's first read of the workflow.
+            return real_workflow(home)
+
+        cwd = os.getcwd()
+        os.chdir(self.project)
+        self.addCleanup(os.chdir, cwd)
+        return [patch.dict(os.environ, HOME=str(self.home), T3_BOAT_PROFILE="codex-only"),
+                patch.object(role_profile, "write", write), patch.object(fcntl, "flock", flock),
+                patch.object(playbook_skills, "workflow", workflow),
+                patch.object(worker, "provision", return_value="bx_1"),
+                patch.object(worker, "link", lambda vm, role, note, providers: self.launched.append(
+                    (role, providers, note))),
+                redirect_stdout(StringIO())]
+
+    def finish(self, *threads):
+        for thread in threads:
+            thread.join(self.WAIT)
+            self.assertFalse(thread.is_alive(), f"{thread.name} did not finish")
+        self.assertEqual(self.errors, [])
+        # The setup always completes, after the launch or before it.
+        self.assertEqual(playbook_skills.workflow(self.home), "generic")
+        self.assertEqual(json.loads((self.home / "profiles/codex-only.json").read_text()), self.new)
+        self.assertFalse(role_profile.journal_path(self.home).exists())
+        self.assertEqual(len(self.launched), 1)
+        return self.launched[0]
+
+    def enter(self, patches):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        for manager in patches:
+            stack.enter_context(manager)
+
+    def test_a_setup_committing_during_a_launch_waits_until_the_launch_has_read_the_state(self):
+        threads = {}
+
+        def before_workflow_read():
+            # The launch has finished any recovery and starts reading; now the setup commits its new choice.
+            threads["setup"] = self.run_in("setup", self.setup_commit)
+            # Either the setup finds the lock held (it waits for this launch), or, without the lock, it writes the
+            # new rows and pauses before the workflow: the mixed state this launch would then go on to read.
+            self.assertTrue(self.arrived.wait(self.WAIT), "setup never started")
+
+        expected = self.complete(self.old, "playbook")
+        self.enter(self.harness(before_workflow_read))
+        launch = self.run_in("launch", self.launch)
+        launch.join(self.WAIT)
+        self.assertFalse(launch.is_alive(), "launch did not finish")
+        self.resume.set()
+        self.assertEqual(self.finish(threads["setup"]), expected)  # The old state, whole.
+        self.assertTrue(self.blocked["setup"].is_set(), "the setup was not held back by the launch's state lock")
+
+    def test_a_launch_during_a_paused_setup_reads_only_the_completed_new_state(self):
+        expected = self.complete(self.new, "generic")
+        self.enter(self.harness())
+        setup = self.run_in("setup", self.setup_commit)
+        self.assertTrue(self.paused.wait(self.WAIT), "setup did not reach its workflow file")
+        # The new rows are on disk and the workflow file still says playbook: the state a launch must not read.
+        self.assertEqual(json.loads((self.home / "profiles/codex-only.json").read_text()), self.new)
+        self.assertEqual(playbook_skills.workflow_path(self.home).read_text(), "playbook\n")
+        launch = self.run_in("launch", self.launch)
+        self.assertTrue(self.blocked["launch"].wait(self.WAIT), "launch did not wait for the setup's state lock")
+        self.assertEqual(self.launched, [])
+        self.resume.set()
+        self.assertEqual(self.finish(setup, launch), expected)  # The new state, whole.
 
 
 class StatusTests(Home):

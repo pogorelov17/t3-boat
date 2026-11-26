@@ -23,7 +23,13 @@ if sys.argv[1] == "logs":
 elif sys.argv[1] == "exec" and sys.argv[3:] == ["t3-boat", "status"]:
     if mode == "error":
         sys.exit(125)
+    if mode == "ready":
+        print("[ok] Boat account")
+        print("Setup verified. Push and pull-request permissions are exercised on your first change.")
+        sys.exit(0)
     print("[missing] Boat account")
+    if mode == "stderr-hint":  # An error exit names the next step on stderr; stdout ends elsewhere.
+        sys.exit("Setup interrupted.\\nNext: docker exec -it t3-boat t3-boat setup")
     print("  {NEEDLE}" if mode != "missing" else "  nothing")
     if mode == "crash":
         print("Workflow: generic workers")
@@ -86,6 +92,41 @@ class SmokeLibTests(unittest.TestCase):
         self.assertEqual(result.returncode, 125)
         self.assertNotIn("passed", result.stdout)
         self.assertIn("docker exec c1 t3-boat status failed (exit 125)", result.stderr)
+
+    INCOMPLETE = 'status=$(incomplete_status c1); printf "%s\\n" "${status##*$\'\\n\'}"; echo passed'
+
+    def test_an_incomplete_status_passes_with_exit_1_and_its_setup_hint(self):
+        result = self.check("match", self.INCOMPLETE)
+        self.assertEqual((result.returncode, result.stdout),
+                         (0, "Next: docker exec -it t3-boat t3-boat setup\npassed\n"), result.stderr[-500:])
+
+    def test_a_ready_status_fails_the_incomplete_check(self):
+        result = self.check("ready", self.INCOMPLETE)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("passed", result.stdout)
+        self.assertIn("Setup verified.", result.stderr)
+        self.assertIn("docker exec c1 t3-boat status reported a ready setup", result.stderr)
+
+    def test_a_docker_exec_failure_fails_the_incomplete_check_with_its_own_status(self):
+        result = self.check("error", self.INCOMPLETE)
+        self.assertEqual(result.returncode, 125)
+        self.assertNotIn("passed", result.stdout)
+        self.assertIn("docker exec c1 t3-boat status failed (exit 125)", result.stderr)
+
+    def test_exit_1_without_the_setup_hint_last_on_stdout_fails_the_incomplete_check(self):
+        for mode in ("crash", "stderr-hint"):
+            with self.subTest(mode=mode):
+                result = self.check(mode, self.INCOMPLETE)
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("passed", result.stdout)
+                self.assertIn("t3-boat status exited 1 without its last line", result.stderr)
+
+    def test_the_smoke_test_requires_an_incomplete_status_on_a_fresh_volume(self):
+        smoke = (ROOT / "tests/smoke-image.sh").read_text()
+        fresh = smoke.split("A fresh install has no subscriptions", 1)[1].split("\n  if ", 1)[0]
+        self.assertIn('incomplete_status "$container"', fresh)
+        # A bare `if docker exec ... t3-boat status` took any failure, docker's own 125 included, as incomplete.
+        self.assertNotIn("if docker exec", smoke.replace("if docker exec \"$container\" curl", ""))
 
     def test_the_earlier_pipe_into_grep_q_fails_on_the_same_output(self):
         # The control: grep -q exits at the match and docker logs dies writing the rest, so pipefail fails.

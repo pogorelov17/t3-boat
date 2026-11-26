@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import playbook_skills
-from role_profile import PARENT, PROVIDERS, OPTION, read_profile, recover, uses_roles
+from role_profile import PARENT, PROVIDERS, OPTION, read_profile, recover, recover_locked, state_lock, uses_roles
 
 
 def output(*args):
@@ -297,35 +297,47 @@ def verify(environment, slug=None):
         print(f"[ok] Deleted {vm}", flush=True)
 
 
-def start(role_name=None):
-    """Start a worker for a profile row, or a generic worker when no row is named.
+def worker_plan(role_name=None):
+    """What a worker for `role_name` receives: (model row, enabled providers or None, label, instructions).
 
     With generic workers, a named row is a model preset and the worker gets WORKER_NOTE. In a workflow with
     roles, every worker has a role: the playbook writes its guide, and an installation kept from an earlier
     release writes nothing, as it did then. A generic worker is refused there, because its note lets it
     split its work, which the roles do not allow.
+
+    The active profile, its rows, the workflow and the guide are read under the state lock, after any
+    interrupted setup is finished, so they all come from one complete state even while setup commits a new one.
     """
-    profile = os.environ.get("T3_BOAT_PROFILE") or (Path.home() / "profiles/active").read_text().strip()
-    recover(profile)
-    workflow = playbook_skills.workflow(Path.home())
-    roles = read_profile(profile, workflow)
-    children = ", ".join(key for key in roles if key != PARENT)
-    if role_name is None:
-        if uses_roles(workflow):
-            raise ValueError("This machine uses the role workflow, so every worker has a role. Run boat-worker "
-                             f"start ROLE with a row of the active profile ({children}); rerun t3-boat setup "
-                             "to switch to generic workers")
-        # A generic worker opens with the lead's model; every provider of the profile stays selectable.
-        role, providers, label, note = roles[PARENT], PROVIDERS[profile], "a generic worker", WORKER_NOTE
-    elif role_name == PARENT or role_name not in roles:
-        if uses_roles(workflow):
-            raise ValueError(f"Select a child role from the active profile: {children}")
-        raise ValueError("Run boat-worker start for a generic worker"
-                         + (f", or name a preset of the active profile: {children}" if children else ""))
-    else:
-        role, providers, label = roles[role_name], None, role_name
-        guide = playbook_skills.worker_guide(Path.home(), role_name)
-        note = guide if workflow == "playbook" else None if uses_roles(workflow) else WORKER_NOTE
+    home = Path.home()
+    with state_lock(home):
+        profile = os.environ.get("T3_BOAT_PROFILE") or (home / "profiles/active").read_text().strip()
+        recover_locked(profile)
+        workflow = playbook_skills.workflow(home)
+        roles = read_profile(profile, workflow)
+        children = ", ".join(key for key in roles if key != PARENT)
+        if role_name is None:
+            if uses_roles(workflow):
+                raise ValueError("This machine uses the role workflow, so every worker has a role. Run boat-worker "
+                                 f"start ROLE with a row of the active profile ({children}); rerun t3-boat setup "
+                                 "to switch to generic workers")
+            # A generic worker opens with the lead's model; every provider of the profile stays selectable.
+            return roles[PARENT], PROVIDERS[profile], "a generic worker", WORKER_NOTE
+        if role_name == PARENT or role_name not in roles:
+            if uses_roles(workflow):
+                raise ValueError(f"Select a child role from the active profile: {children}")
+            raise ValueError("Run boat-worker start for a generic worker"
+                             + (f", or name a preset of the active profile: {children}" if children else ""))
+        if workflow == "playbook":
+            note = playbook_skills.worker_guide(home, role_name)
+        else:
+            note = None if uses_roles(workflow) else WORKER_NOTE
+        return roles[role_name], None, role_name, note
+
+
+def start(role_name=None):
+    """Start a worker for a profile row, or a generic worker when no row is named (see worker_plan)."""
+    # The state is read once, under its lock; provisioning runs without it, so setup is never kept waiting.
+    role, providers, label, note = worker_plan(role_name)
     # Only provision from a configured project stub; nothing on the host fetches origin.
     binding = subprocess.run(["git", "config", "--local", "--get", "boat.environment"],
                              text=True, capture_output=True)

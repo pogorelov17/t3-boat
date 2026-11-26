@@ -32,12 +32,9 @@ for profile in codex-only claude-only codex+claude; do
   # Every installed t3-boat file is readable by the container user, whatever the build checkout's umask.
   unreadable=$(docker exec "$container" find /opt/t3-boat ! -perm -a+r -print -quit)
   [[ -z "$unreadable" ]] || { echo "Unreadable in the image: $unreadable" >&2; exit 1; }
-  # A fresh install has no subscriptions or Boat project. Offline status must
-  # report incomplete, even though the actual T3 backend is already serving.
-  if docker exec "$container" t3-boat status; then
-    echo "Unexpected ready status for empty $profile volume" >&2
-    exit 1
-  fi
+  # A fresh install has no subscriptions or Boat project. Offline status must report incomplete (exit 1 and
+  # the setup hint), even though the actual T3 backend is already serving; a docker failure is not that.
+  incomplete_status "$container"
   if [[ "$profile" == codex-only ]]; then
     # The real server must return its provider snapshot even before login.
     docker exec "$container" python3 -c 'import sys; sys.path.insert(0, "/opt/t3-boat/lib"); from model_catalog import provider_snapshot; assert any(p["instanceId"] == "codex" for p in provider_snapshot("codex")["providers"])'
