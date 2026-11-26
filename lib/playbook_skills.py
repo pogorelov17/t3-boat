@@ -6,6 +6,7 @@ role's guide in its provider's instruction file on its VM (see boat-worker).
 """
 import json
 import os
+import re
 from pathlib import Path
 
 from playbook import read_regular, skill_name
@@ -35,7 +36,13 @@ def skill_text(package, role, lead_role):
 def generated(path):
     """Whether a file was written by t3-boat; anything else, including a directory, belongs to the owner."""
     try:
-        return MARK in read_regular(path).decode("utf-8", errors="replace")
+        name = path.parent.name
+        if not re.fullmatch(r"playbook-[a-z0-9-]+-[0-9a-f]{8}", name) or path.parent.is_symlink() or path.is_symlink():
+            return False
+        text = read_regular(path).decode("utf-8", errors="replace")
+        return re.match(r"---\nname: " + re.escape(name) + r"\ndescription: [^\n]*\n---\n\n"
+                        + re.escape(MARK) + r" [^\n]+\. t3-boat replaces this file; delete this line to keep your edits\. -->\n",
+                        text) is not None
     except OSError:
         return False
 
@@ -72,7 +79,7 @@ def plan(bases, enabled, package, lead_role=None):
                     kept.append(path)
                 else:
                     writes[path] = skill_text(package, role, lead_role)
-        for path in sorted((Path(base) / "skills").glob("*/SKILL.md")):
+        for path in sorted((Path(base) / "skills").glob("playbook-*/SKILL.md")):
             if path not in wanted and generated(path):
                 removals.append(path)
     return writes, removals, kept, blocked

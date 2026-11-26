@@ -133,6 +133,17 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("No model set of the package is selected", skill)
         self.assertFalse((self.home / ".claude/skills").exists())
 
+    def test_generic_start_preserves_owner_skills_that_quote_the_marker(self):
+        save(self.home, "codex-only")
+        for name in ("team-notes", "playbook-custom-team-01234567"):
+            path = self.home / ".codex/skills" / name / "SKILL.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            contents = (f"---\nname: {name}\ndescription: Notes\n---\n\nExample:\n"
+                        f"{playbook_skills.MARK} example. t3-boat replaces this file; delete this line to keep your edits. -->\n")
+            path.write_text(contents)
+            self.serve("codex-only")
+            self.assertEqual(path.read_text(), contents)
+
     def test_detaching_removes_only_generated_guides(self):
         save(self.home, "codex-only", {"path": str(self.package), "model_set": "codex-crew", "lead_role": None})
         self.serve("codex-only")
