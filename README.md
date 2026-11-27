@@ -15,7 +15,7 @@ Discuss your task in T3 with Codex or Claude. For example, ask “Fix the failin
 
 ## Quick start
 
-You need a Linux server with [Docker Engine](https://docs.docker.com/engine/install/) (AMD64 or ARM64), a Boat account that can start a small VM, a GitHub account and the subscriptions for your profile. A repository is optional.
+You need a Linux server with curl and [Docker Engine](https://docs.docker.com/engine/install/) (AMD64 or ARM64), a Boat account that can start a small VM, a GitHub account and the subscriptions for your profile. A repository is optional.
 
 ### 1. Start the container
 
