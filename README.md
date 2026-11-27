@@ -45,20 +45,6 @@ flowchart TB
     style VM fill:#f8fafc,stroke:#cbd5e1,stroke-dasharray:5 5,color:#64748b
 ```
 
-For each delegation, result or decision, the lead posts a short update with links instead of shell logs. For example, after you ask “Fix the failing date test, explain why it broke and open a pull request with the fix.”:
-
-> - **Who → whom:** lead → worker on `bx_7f3k` (child chat), Codex, lead model, high effort
-> - **Asked:** reproduce the failing `test_parse_iso_date`, fix it and open a pull request
-> - **Depends on:** `main` at `4e1c9a2`
-> - **Result:** the parser dropped the `Z` offset; fixed in `src/dates.py`; `pytest` 142 passed, 0 failed; pull request `#42` opened
-> - **Decision:** `#42` is ready for your review.
-
-With a [playbook](#2-choose-a-playbook-optional) attached, its roles and their order decide who gets the next brief. The update takes the same form.
-
-**What survives cleanup.** The lead copies each outcome into your chat before it deletes the worker's VM. Afterwards, the T3 history on your server and whatever the worker actually delivered elsewhere, such as a pushed branch or a pull request, remain. The worker's checkout, its chat and anything else left on the VM are gone.
-
-Your server hosts T3 and handles worker provisioning and cleanup. The lead can plan and check a fact on the web. Workers clone the project, install its dependencies, edit its source and run builds and tests on Boat VMs.
-
 ## Quick start
 
 ### AI agent installation contract
