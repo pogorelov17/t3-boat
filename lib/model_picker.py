@@ -84,6 +84,8 @@ def configure(profile, attachment, package=None):
     release by now; the path itself is saved, so a later container start or setup reads whatever it names then.
     Without `package` the attachment is read here, once.
     """
+    print("OWNER DECISION: use only the owner's explicit lead-model choice. An installation agent must stop and "
+          "show the available choices unless the owner already allowed setup's recommendation.")
     if profile not in PROVIDERS:
         raise ValueError(f"Unknown profile {profile!r}")
     loaded = check_attachment(profile, attachment, package)

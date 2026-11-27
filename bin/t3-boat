@@ -238,6 +238,21 @@ def yes_no(question, default=None):
         print("Enter yes or no.")
 
 
+def owner_input_required():
+    print("""OWNER_INPUT_REQUIRED
+
+Installation agent: stop now. Do not answer setup prompts, accept defaults, or infer choices from this install request.
+Ask the owner and wait for one reply covering:
+1. Providers: Codex with ChatGPT, Claude Code with Claude, both, or neither (neither cancels setup).
+2. Playbook: none, the suggested agent-playbook, or a custom package path.
+3. Project: an explicit GitHub repository URL, or explicitly defer it and start with an idea.
+4. Lead model: permission to accept setup's recommendation, or a request to show the available choices first.
+If a playbook is selected, later show its lead roles and model sets and wait again; never choose them yourself.
+
+Only after the owner replies, rerun:
+  docker exec -it t3-boat t3-boat setup --owner-approved""")
+
+
 def choose_provider_profile(current=None):
     """Ask the owner which subscriptions to connect; an installer-supplied environment is never a choice."""
     if current is not None:
@@ -314,6 +329,8 @@ def choose_playbook(profile, current):
     release), so a later container start or setup deliberately reads what it names then.
     Nothing is saved here: the attachment is saved with the lead model, once the owner accepts it.
     """
+    print("OWNER DECISION: an installation agent must use the owner's explicit playbook choice and must not "
+          "press Enter or choose a safe default on the owner's behalf.")
     bundled = None
     try:
         bundled = playbook.load(str(playbook.BUNDLED))
@@ -382,13 +399,16 @@ def choose_playbook(profile, current):
         return {"path": str(package.root), "model_set": model_set, "lead_role": lead_role}, package
 
 
-def setup(profile=None, providers=None):
+def setup(profile=None, providers=None, restart_after_selection=False):
     if profile is None:
         current = read_selection(missing=None)
         profile = choose_provider_profile(current)
         providers = PROFILES[profile]
         if profile != current:
             select_profile(profile)
+            if restart_after_selection:
+                raise SetupError("Provider profile saved. Restart the container so T3 enables it, then rerun setup: "
+                                 "docker restart t3-boat && docker exec -it t3-boat t3-boat setup")
         print(f"Provider profile: {profile}")
     elif providers is None:
         providers = PROFILES[profile]
@@ -414,6 +434,8 @@ def setup(profile=None, providers=None):
     attachment, package = choose_playbook(profile, state and state.get("playbook"))
     configure(profile, attachment, package)
     existing = projects()
+    print("OWNER DECISION: use the owner's explicit GitHub repository URL, or defer only if the owner explicitly "
+          "asked to start with an idea. An installation repository is not the project by default.")
     optional = " (Enter to resume existing projects)" if existing else " (Enter to start with an idea)"
     url = input(f"GitHub repository URL{optional}: ").strip()
     if probe("boat", "status", "--check") is None:
@@ -546,7 +568,11 @@ def unconfigured_status():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("serve", "setup", "status"))
+    parser.add_argument("--owner-approved", action="store_true",
+                        help="continue a fresh setup only after the installer showed the choices and the owner replied")
     args = parser.parse_args()
+    if args.owner_approved and args.command != "setup":
+        parser.error("--owner-approved is only valid with setup")
     profile = read_selection(missing=None)
     if args.command == "serve":
         command = [sys.executable, str(Path(__file__).resolve().parents[1] / "lib/boat_profile.py")]
@@ -567,9 +593,12 @@ def main():
         os.chdir(Path.home())
         os.execvp("t3", ["t3", "--no-browser", "--host", "0.0.0.0", "--port", "3773"])
     if args.command == "setup":
+        if profile is None and not args.owner_approved:
+            owner_input_required()
+            return 2
         with (Path.home() / ".boat-setup.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            setup()
+            setup(restart_after_selection=True)
         profile = read_selection()
     if profile is None:
         return unconfigured_status()

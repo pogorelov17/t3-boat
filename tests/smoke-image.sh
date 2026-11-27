@@ -122,16 +122,22 @@ start() {
 # Run real setup with ANSWERS on stdin, against offline service doubles for Boat, the providers and their model
 # lists; its output is kept in /data/setup-output.
 run_setup() {  # ANSWERS
-  local selected answers
+  local selected answers first output
   selected=$(docker exec "$container" sh -c 'test -f /data/profiles/selection.json && echo yes || echo no')
   if [[ $selected == yes ]]; then
     answers=$'\n'$1  # Keep the already selected provider profile.
   else
     case "$profile" in
-      codex-only) answers=$'yes\nno\n'$1 ;;
-      claude-only) answers=$'no\nyes\n'$1 ;;
-      codex+claude) answers=$'yes\nyes\n'$1 ;;
+      codex-only) first=$'yes\nno\n' ;;
+      claude-only) first=$'no\nyes\n' ;;
+      codex+claude) first=$'yes\nyes\n' ;;
     esac
+    output=$(printf '%s' "$first" | docker exec -i "$container" t3-boat setup --owner-approved 2>&1) && {
+      echo "first approved setup did not stop for a restart" >&2; return 1;
+    }
+    require 't3-boat setup --owner-approved' "$output" 'Restart the container so T3 enables it'
+    restart
+    answers=$'\n'$1
   fi
   docker exec -i -e "ANSWERS=$answers" "$container" sh -eu <<'SH'
 auth_tools=$(mktemp -d)
@@ -208,6 +214,9 @@ for profile in codex-only claude-only codex+claude; do
   # A fresh install has no subscriptions or Boat project. Offline status must report incomplete (exit 1 and
   # the setup hint), even though the actual T3 backend is already serving; a docker failure is not that.
   incomplete_status "$container"
+  gate=$(docker exec "$container" t3-boat setup 2>&1) && { echo "fresh setup passed without owner approval" >&2; exit 1; }
+  require 'fresh t3-boat setup' "$gate" 'OWNER_INPUT_REQUIRED'
+  docker exec "$container" test ! -e /data/profiles/selection.json
   if [[ "$profile" == codex-only ]]; then
     # The real server must return its provider snapshot even before login.
     docker exec "$container" python3 -c 'import sys; sys.path.insert(0, "/opt/t3-boat/lib"); from model_catalog import provider_snapshot; assert any(p["instanceId"] == "codex" for p in provider_snapshot("codex")["providers"])'

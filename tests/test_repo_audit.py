@@ -35,12 +35,13 @@ def without_pin_table(path):
 class AuditTests(unittest.TestCase):
     def test_ai_installer_waits_for_owner_choices_before_commands(self):
         readme = (ROOT / "README.md").read_text()
-        start = readme.index("**Installing with an AI agent?**")
+        start = readme.index("### AI agent installation contract")
         requirements = readme.index("You need a Linux server")
         rule = readme[start:requirements]
-        self.assertIn("Before it runs any command, it must ask for and wait for your explicit choices", rule)
-        self.assertIn("not consent to choose any of them", rule)
-        self.assertIn("must not infer answers", rule)
+        self.assertIn("OWNER_INPUT_REQUIRED", rule)
+        self.assertIn("stop its turn and wait", rule)
+        self.assertIn("must not rerun setup with `--owner-approved` until the owner replies", rule)
+        self.assertIn("must not infer", rule)
         for outcome in ("codex-only", "claude-only", "codex+claude", "neither stops the installation"):
             self.assertIn(outcome, rule)
         for choice in ("no playbook", "suggested `agent-playbook`", "custom package path",

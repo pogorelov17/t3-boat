@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -31,6 +32,23 @@ class RuntimeTests(unittest.TestCase):
                          "passAgentsCredentials": True, "credentialProfileId": None,
                          "selectedRepositories": [{"fullName": "owner/example"}]}
         self.profiles = [{"id": "p", "isDefault": True, "connected": ["chatgpt-subscription"]}]
+
+    def test_fresh_cli_stops_before_reading_input_until_the_owner_replies(self):
+        with patch.object(sys, "argv", ["t3-boat", "setup"]), \
+                patch("builtins.input", side_effect=AssertionError("setup read input")), \
+                redirect_stdout(StringIO()) as output:
+            self.assertEqual(cli.main(), 2)
+        self.assertIn("OWNER_INPUT_REQUIRED", output.getvalue())
+        self.assertIn("stop now", output.getvalue())
+        self.assertFalse((Path(self.home.name) / "profiles/selection.json").exists())
+
+    def test_first_approved_profile_stops_for_a_restart_before_model_discovery(self):
+        with patch("builtins.input", side_effect=["yes", "yes"]), \
+                patch.object(cli, "t3_online") as online, \
+                self.assertRaisesRegex(cli.SetupError, "Restart the container"):
+            cli.setup(restart_after_selection=True)
+        self.assertEqual(cli.read_selection(), "codex+claude")
+        online.assert_not_called()
 
     def test_fresh_setup_requires_explicit_provider_answers_and_ignores_the_environment(self):
         with patch.dict(os.environ, T3_BOAT_PROFILE="codex-only"), \

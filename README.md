@@ -61,7 +61,11 @@ Your server hosts T3 and handles worker provisioning and cleanup. The lead can p
 
 ## Quick start
 
-**Installing with an AI agent?** Before it runs any command, it must ask for and wait for your explicit choices of provider profile, playbook and project. The container starts unconfigured, and setup itself asks for your provider subscriptions before it installs or signs in to either provider. The agent must show you every provider, playbook and project prompt and wait for your explicit answer. A request to install T3 Boat is not consent to choose any of them. It must not infer answers from the agent doing the installation or from a repository URL in the install request.
+### AI agent installation contract
+
+**Installing with an AI agent?** A request to install T3 Boat authorizes infrastructure work, not setup decisions. On a fresh volume, the first `t3-boat setup` prints `OWNER_INPUT_REQUIRED` and exits without reading answers. The agent must show that block to the owner, stop its turn and wait. It must not rerun setup with `--owner-approved` until the owner replies.
+
+The agent must obtain explicit choices of provider profile, playbook, project and whether it may accept setup's recommended lead model. It must not infer them from the installing agent, this repository URL or an omitted answer. If a playbook is selected, it must later show its lead roles and model sets and wait again. It must never press **Enter**, choose `none`, defer the project or select a model on the owner's behalf.
 
 - **Provider profile:** setup asks separately whether to connect Codex with ChatGPT and Claude Code with Claude. Codex only uses `codex-only`; Claude only uses `claude-only`; both use `codex+claude`; neither stops the installation without changing the saved choice.
 - **Playbook:** choose no playbook, the suggested `agent-playbook`, or a custom package path. The agent must not download or attach one until you choose it. If you attach one, the agent must also show you its available lead roles and model sets and wait for those choices.
@@ -123,6 +127,14 @@ If you are not ready to choose a repository, explicitly defer it and use **Start
 ```sh
 docker exec -it t3-boat t3-boat setup
 ```
+
+On a fresh volume this command only prints the owner questions and stops. After the owner answers them, continue with:
+
+```sh
+docker exec -it t3-boat t3-boat setup --owner-approved
+```
+
+Saving a new provider profile deliberately stops setup once and asks for a container restart. Restart it and rerun the ordinary setup command; this makes the already-running T3 process load the selected providers before model discovery.
 
 Setup asks, in this order:
 
