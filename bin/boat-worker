@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import playbook_skills
-from boat_profile import MISSING, PARENT, PROVIDERS, OPTION, ProfileError, read_applied, read_state, state_lock
+from boat_profile import MISSING, PARENT, PROVIDERS, OPTION, ProfileError, read_applied, read_state, runtime_profile, state_lock
 
 # The remote command that runs a setup script read from standard input. The script itself never travels in an
 # argument, so a long role guide cannot exceed the argument size limit here or on the VM.
@@ -257,7 +257,7 @@ def probe_rows(lead, profile):
 
 
 def verify(environment, slug=None):
-    profile = os.environ["T3_BOAT_PROFILE"]
+    profile = runtime_profile()
     with state_lock():
         state = read_state(profile)  # The check covers the lead model; the attached playbook plays no part.
     if state is MISSING:
@@ -317,7 +317,7 @@ def worker_plan(role=None):
     """
     home = Path.home()
     with state_lock(home):
-        profile = os.environ.get("T3_BOAT_PROFILE") or (home / "profiles/active").read_text().strip()
+        profile = runtime_profile(home)
         state, package = read_applied(profile)
     lead = state[PARENT]
     if role is None:

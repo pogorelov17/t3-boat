@@ -32,6 +32,36 @@ class RuntimeTests(unittest.TestCase):
                          "selectedRepositories": [{"fullName": "owner/example"}]}
         self.profiles = [{"id": "p", "isDefault": True, "connected": ["chatgpt-subscription"]}]
 
+    def test_fresh_setup_requires_explicit_provider_answers_and_ignores_the_environment(self):
+        with patch.dict(os.environ, T3_BOAT_PROFILE="codex-only"), \
+                patch("builtins.input", side_effect=["yes", "yes"]), \
+                patch.object(cli, "t3_online", return_value=True), \
+                patch.object(cli, "logged_in", return_value=True) as logged_in, \
+                patch.object(cli, "run") as run, \
+                patch.object(cli, "choose_playbook", side_effect=cli.SetupError("stop after providers")), \
+                self.assertRaisesRegex(cli.SetupError, "stop after providers"):
+            cli.setup()
+        self.assertEqual(cli.read_selection(), "codex+claude")
+        self.assertEqual([call.args[0] for call in logged_in.call_args_list], ["codex", "claude"])
+        run.assert_called_once_with("install-claude")
+
+    def test_provider_choice_matrix_and_neither_cancels_without_changing_selection(self):
+        for answers, expected in [(["yes", "no"], "codex-only"), (["no", "yes"], "claude-only"),
+                                  (["yes", "yes"], "codex+claude")]:
+            with self.subTest(answers=answers), patch("builtins.input", side_effect=answers):
+                self.assertEqual(cli.choose_provider_profile(), expected)
+        cli.select_profile("codex+claude")
+        with patch("builtins.input", side_effect=["yes", "no", "no"]), \
+                self.assertRaisesRegex(cli.SetupError, "At least one provider"):
+            cli.setup()
+        self.assertEqual(cli.read_selection(), "codex+claude")
+
+    def test_fresh_provider_questions_accept_no_empty_default(self):
+        with patch("builtins.input", side_effect=["", "maybe", "yes", "no"]), \
+                redirect_stdout(StringIO()) as output:
+            self.assertEqual(cli.choose_provider_profile(), "codex-only")
+        self.assertEqual(output.getvalue().count("Enter yes or no."), 2)
+
     def test_https_and_ssh_urls_without_credentials_or_traversal(self):
         for url in ("https://github.com/Owner/example.git/", "git@github.com:Owner/example.git"):
             self.assertEqual(cli.repo_slug(url), "Owner/example")
@@ -155,6 +185,7 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(run.call_args.args[0], ["boat", "deletion", "status", "bdop_example", "--json"])
 
     def test_failed_model_reply_or_cleanup_fails_worker_check(self):
+        cli.select_profile("codex+claude")
         for failure in ("reply", "delete"):
             with self.subTest(failure=failure):
                 calls = []

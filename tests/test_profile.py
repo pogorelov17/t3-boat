@@ -45,9 +45,12 @@ class ProfileTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.package = write_package(self.home / "teams/harbor")
 
-    def serve(self, profile, check=True):
+    def serve(self, profile=None, check=True):
         """What the container start runs before T3."""
-        return subprocess.run([sys.executable, str(ROOT / "lib/boat_profile.py"), profile], env=self.env,
+        command = [sys.executable, str(ROOT / "lib/boat_profile.py")]
+        if profile is not None:
+            command.append(profile)
+        return subprocess.run(command, env=self.env,
                               capture_output=True, text=True, check=check)
 
     def files(self):
@@ -63,6 +66,15 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn("defaultModelSelection", settings)
         self.assertFalse((self.home / "profiles/codex-only.json").exists())
         self.assertFalse((self.home / ".codex/skills").exists())
+
+    def test_unconfigured_start_enables_no_provider_and_has_no_active_profile(self):
+        self.serve()
+        settings = json.loads((self.home / ".t3/userdata/settings.json").read_text())
+        self.assertFalse(settings["providerInstances"]["codex"]["enabled"])
+        self.assertFalse(settings["providerInstances"]["claudeAgent"]["enabled"])
+        self.assertNotIn("defaultModelSelection", settings)
+        self.assertFalse((self.home / "profiles/active").exists())
+        self.assertFalse((self.home / "profiles/selection.json").exists())
 
     def test_every_profile_without_a_playbook_is_idempotent_and_keeps_user_settings(self):
         settings = self.home / ".t3/userdata/settings.json"

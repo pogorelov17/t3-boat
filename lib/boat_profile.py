@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply one Docker installation's saved choices before starting T3.
 
-A profile file, `profiles/PROFILE.json`, holds everything setup chose for that T3_BOAT_PROFILE:
+A profile file, `profiles/PROFILE.json`, holds everything setup chose for that provider profile:
 
     {"lead": {"provider": ..., "model": ..., "effort": ...},
      "playbook": null | {"path": "/absolute/package/dir", "model_set": null | "NAME", "lead_role": null | "ROLE"}}
@@ -83,11 +83,58 @@ def read_owned(path, default=""):
 
 def check_profile_name(name):
     if name not in PROVIDERS:
-        raise ProfileError("T3_BOAT_PROFILE must be one of: " + ", ".join(PROVIDERS))
+        raise ProfileError("profile must be one of: " + ", ".join(PROVIDERS))
 
 
 def profile_path(name, home=None):
     return Path(home or Path.home()) / "profiles" / (name + ".json")
+
+
+def selection_path(home=None):
+    return Path(home or Path.home()) / "profiles/selection.json"
+
+
+def read_selection(missing=MISSING, home=None):
+    """The provider profile explicitly selected in setup, or `missing` before that choice."""
+    target = selection_path(home)
+    selection = saved(target, missing=MISSING)
+    if selection is MISSING:
+        return missing
+    if not isinstance(selection, dict) or set(selection) != {"profile"}:
+        raise ProfileError(f"{target}: expected an object with only the profile key")
+    try:
+        check_profile_name(selection["profile"])
+    except ProfileError as error:
+        raise ProfileError(f"{target}: {error}") from None
+    return selection["profile"]
+
+
+def select_profile(name, home=None):
+    """Persist the owner's explicit setup choice atomically."""
+    check_profile_name(name)
+    home = Path(home or Path.home())
+    with state_lock(home):
+        write(selection_path(home), json.dumps({"profile": name}, indent=2) + "\n")
+
+
+def runtime_profile(home=None):
+    """The confirmed selection, or the generated active pointer used by provider child processes."""
+    home = Path(home or Path.home())
+    selected = read_selection(missing=None, home=home)
+    if selected is not None:
+        return selected
+    active = home / "profiles/active"
+    try:
+        name = playbook.read_regular(active).decode("utf-8").strip()
+    except FileNotFoundError:
+        raise ProfileError("Select provider subscriptions with t3-boat setup first") from None
+    except (OSError, UnicodeDecodeError) as error:
+        raise ProfileError(f"{active}: cannot be read: {getattr(error, 'strerror', None) or error}") from None
+    try:
+        check_profile_name(name)
+    except ProfileError as error:
+        raise ProfileError(f"{active}: {error}") from None
+    return name
 
 
 def json_kind(value):
@@ -299,7 +346,7 @@ def disabled_note(name, reason):
             "fixes it. Planning conversation is fine.")
 
 
-def plan(name, state=None, warn=None, loaded=None):
+def plan(name=None, state=None, warn=None, loaded=None):
     """Compute every file generated for profile `name` from `state` (by default, the saved one).
 
     Returns (writes, removals, notices). Nothing is written. `loaded` is the (package, model set, lead role) that
@@ -307,12 +354,13 @@ def plan(name, state=None, warn=None, loaded=None):
     read is reported through `warn` and leaves the profile unapplied, so T3 still starts and setup can attach it
     again.
     """
-    check_profile_name(name)
+    if name is not None:
+        check_profile_name(name)
     home = Path.home()
     notices = []
     package = model_set = lead_role = None
     reason = "setup has not saved it yet"
-    if state is None:
+    if state is None and name is not None:
         state = read_state(name, missing=None)
     if state is not None:
         check_state(name, state)
@@ -327,7 +375,7 @@ def plan(name, state=None, warn=None, loaded=None):
             # otherwise put a marker line inside the managed block and break the next start.
             state, reason = None, ("its attached playbook cannot be read; the container log and "
                                    "`docker exec t3-boat t3-boat status` name the file")
-    enabled = PROVIDERS[name]
+    enabled = PROVIDERS[name] if name is not None else ()
     if state is not None:
         # The Boat skill holds the workflow the lead is told to follow; a file the owner put at its path is kept,
         # and the profile stays unapplied until it is moved, so the lead is never sent to text t3-boat did not write.
@@ -406,12 +454,17 @@ def plan(name, state=None, warn=None, loaded=None):
             writes[target] = instructions(target, "")
     writes[path] = json.dumps(settings, indent=2) + "\n"
     # A provider's child shell may omit custom environment variables.
-    writes[home / "profiles/active"] = name + "\n"
-    record = applied_path(name, home)
-    if state is None:
+    active = home / "profiles/active"
+    record = applied_path(name, home) if name is not None else None
+    if name is None:
+        if active.exists() or active.is_symlink():
+            removals.insert(0, active)
+    else:
+        writes[active] = name + "\n"
+    if state is None and record is not None:
         if record.exists() or record.is_symlink():
             removals.insert(0, record)  # Removed first, so no worker starts from the earlier choice.
-    else:
+    elif state is not None:
         roles = {role: playbook_skills.worker_guide(package, role) for role in package.roles} if package else None
         writes[record] = json.dumps({"profile": state, "playbook": package and {
             "name": package.name, "label": package.label(where=False), "roles": roles}}, indent=2) + "\n"
@@ -431,7 +484,7 @@ def applied(name):
     return not removals and all(p.is_file() and p.read_bytes() == data.encode() for p, data in writes.items())
 
 
-def prepare(name, state=None, loaded=None):
+def prepare(name=None, state=None, loaded=None):
     """Write the saved choices (when setup passes `state`) and regenerate every file derived from them.
 
     The applied record is removed before anything changes. The profile file is then written in one atomic step:
@@ -441,7 +494,10 @@ def prepare(name, state=None, loaded=None):
     container start or setup regenerates every file.
     `loaded` is what check_attachment returned for `state`, when the caller already read the package.
     """
-    check_profile_name(name)
+    if name is not None:
+        check_profile_name(name)
+    elif state is not None:
+        raise ProfileError("an unconfigured installation cannot have profile state")
     home = Path.home()
     with state_lock(home):
         if state is not None:
@@ -449,16 +505,17 @@ def prepare(name, state=None, loaded=None):
             loaded = loaded or check_attachment(name, state.get("playbook"))
         writes, removals, notices = plan(name, state, loaded=loaded, warn=None if state else
                                          lambda message: print(f"T3 Boat: {message}.", file=sys.stderr))
-        record = applied_path(name, home)
-        if record in removals:
+        record = applied_path(name, home) if name is not None else None
+        if record is not None and record in removals:
             removals.remove(record)
-        last = writes.pop(record, None)
+        last = writes.pop(record, None) if record is not None else None
         # Invalidate the record before the first change: the saved choice can be unchanged while the package's
         # contents changed, so an interrupted run must not leave the earlier record describing new lead files.
-        try:
-            record.unlink(missing_ok=True)
-        except OSError as error:
-            raise ProfileError(f"{record}: cannot be removed: {error.strerror or error}") from None
+        if record is not None:
+            try:
+                record.unlink(missing_ok=True)
+            except OSError as error:
+                raise ProfileError(f"{record}: cannot be removed: {error.strerror or error}") from None
         if state is not None:
             write(profile_path(name, home), json.dumps(state, indent=2) + "\n")
         for path, data in writes.items():
@@ -482,9 +539,9 @@ def prepare(name, state=None, loaded=None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: boat_profile.py PROFILE")
+    if len(sys.argv) not in (1, 2):
+        sys.exit("usage: boat_profile.py [PROFILE]")
     try:
-        prepare(sys.argv[1])
+        prepare(sys.argv[1] if len(sys.argv) == 2 else None)
     except (ProfileError, playbook.PlaybookError) as exc:  # Anything else is a defect and keeps its traceback.
         sys.exit(f"T3 Boat profile: {exc}")

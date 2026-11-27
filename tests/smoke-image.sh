@@ -107,7 +107,7 @@ restart() {
 }
 extra=()  # More `docker run` options, such as bind mounts.
 start() {
-  container=$(docker run -d --network none -v "$volume:/data" "${extra[@]}" -e "T3_BOAT_PROFILE=$profile" "$image")
+  container=$(docker run -d --network none -v "$volume:/data" "${extra[@]}" "$image")
   for _ in {1..60}; do
     if docker exec "$container" curl -fsS --max-time 2 http://127.0.0.1:3773/ -o /dev/null 2>/dev/null; then
       return
@@ -122,7 +122,18 @@ start() {
 # Run real setup with ANSWERS on stdin, against offline service doubles for Boat, the providers and their model
 # lists; its output is kept in /data/setup-output.
 run_setup() {  # ANSWERS
-  docker exec -i -e "ANSWERS=$1" "$container" sh -eu <<'SH'
+  local selected answers
+  selected=$(docker exec "$container" sh -c 'test -f /data/profiles/selection.json && echo yes || echo no')
+  if [[ $selected == yes ]]; then
+    answers=$'\n'$1  # Keep the already selected provider profile.
+  else
+    case "$profile" in
+      codex-only) answers=$'yes\nno\n'$1 ;;
+      claude-only) answers=$'no\nyes\n'$1 ;;
+      codex+claude) answers=$'yes\nyes\n'$1 ;;
+    esac
+  fi
+  docker exec -i -e "ANSWERS=$answers" "$container" sh -eu <<'SH'
 auth_tools=$(mktemp -d)
 cat > "$auth_tools/boat" <<'MOCK'
 #!/bin/sh
@@ -563,6 +574,7 @@ for profile in codex-only claude-only codex+claude; do
   attached='{"path": "/data/teams/crew", "model_set": null, "lead_role": "rigger"}'
   docker exec "$container" sh -c 'mkdir -p /data/profiles && printf "%s\n" "$1" > "/data/profiles/$2.json"' _ \
     "{\"lead\": $lead, \"playbook\": $attached}" "$profile"
+  docker exec "$container" sh -c 'printf "{\"profile\": \"%s\"}\n" "$1" > /data/profiles/selection.json' _ "$profile"
   for step in attach refresh; do restart; bind_check "$profile" playbook; done
   docker exec "$container" sh -c 'printf "EDITED-RIGGER\n" >> /data/teams/crew/people/rigger/ROLE.md'
   restart

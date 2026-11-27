@@ -46,6 +46,9 @@ class AuditTests(unittest.TestCase):
         for choice in ("no playbook", "suggested `agent-playbook`", "custom package path",
                        "explicitly defer it", "only the installation source"):
             self.assertIn(choice, rule)
+        start = readme[readme.index("### 1. Start the container"):readme.index("### 2. Choose a playbook")]
+        self.assertNotIn("T3_BOAT_PROFILE", start)
+        self.assertIn("No provider is selected by this command", start)
 
     def test_ai_installer_cannot_silently_choose_playbook_or_repository(self):
         readme = (ROOT / "README.md").read_text()

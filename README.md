@@ -61,9 +61,9 @@ Your server hosts T3 and handles worker provisioning and cleanup. The lead can p
 
 ## Quick start
 
-**Installing with an AI agent?** Before it runs any command, it must ask for and wait for your explicit choices of provider profile, playbook and project. A request to install T3 Boat is not consent to choose any of them. It must not infer answers from the agent doing the installation or from a repository URL in the install request.
+**Installing with an AI agent?** Before it runs any command, it must ask for and wait for your explicit choices of provider profile, playbook and project. The container starts unconfigured, and setup itself asks for your provider subscriptions before it installs or signs in to either provider. The agent must show you every provider, playbook and project prompt and wait for your explicit answer. A request to install T3 Boat is not consent to choose any of them. It must not infer answers from the agent doing the installation or from a repository URL in the install request.
 
-- **Provider profile:** Codex with ChatGPT only uses `codex-only`; Claude Code with Claude only uses `claude-only`; both use `codex+claude`; neither stops the installation.
+- **Provider profile:** setup asks separately whether to connect Codex with ChatGPT and Claude Code with Claude. Codex only uses `codex-only`; Claude only uses `claude-only`; both use `codex+claude`; neither stops the installation without changing the saved choice.
 - **Playbook:** choose no playbook, the suggested `agent-playbook`, or a custom package path. The agent must not download or attach one until you choose it. If you attach one, the agent must also show you its available lead roles and model sets and wait for those choices.
 - **Project:** provide the GitHub repository you want workers to use, or explicitly defer it and start with an idea. The T3 Boat repository named in an install request is only the installation source unless you explicitly select it as your project.
 
@@ -80,13 +80,12 @@ echo "T3 Boat ${VERSION:?could not resolve the latest release}" &&
   docker pull "pogorelov17/t3-boat:$VERSION"
 ```
 
-Set `T3_BOAT_PROFILE` to `codex-only`, `claude-only` or `codex+claude`, then start it on a new volume. T3 shows the container hostname as its display name.
+Start it on a new volume. No provider is selected by this command; T3 shows the container hostname as its display name.
 
 ```sh
 docker run -d --name t3-boat --hostname "$(hostname -s)" --restart unless-stopped \
   -p 127.0.0.1:3773:3773 \
   -v t3-boat-data:/data \
-  -e T3_BOAT_PROFILE=codex+claude \
   "pogorelov17/t3-boat:${VERSION:?run the commands above first}"
 ```
 
@@ -127,17 +126,18 @@ docker exec -it t3-boat t3-boat setup
 
 Setup asks, in this order:
 
-1. **Sign in** to each provider of your profile. Valid sessions are reused.
-2. **Playbook:** press **Enter** for a generic worker, or enter your explicit choice from [step 2](#2-choose-a-playbook-optional). For an attached playbook, explicitly choose its lead role and model set when offered.
-3. **Lead model:** the model and reasoning level of your chats, which every worker also opens with. Press **Enter** to accept the one shown, or type `edit` to choose another.
-4. **GitHub repository URL:** enter the project URL you chose, or press **Enter** only if you explicitly chose to defer it and start with an idea in **Start here**.
-5. **Boat:** approve the device login if prompted, select the worker environment you prepared and confirm the repository attachment if prompted.
+1. **Provider subscriptions:** answer `yes` or `no` separately for Codex with ChatGPT and Claude Code with Claude. A fresh setup accepts no default and stops if both answers are `no`.
+2. **Sign in** to each selected provider. Valid sessions are reused.
+3. **Playbook:** press **Enter** for a generic worker, or enter your explicit choice from [step 2](#2-choose-a-playbook-optional). For an attached playbook, explicitly choose its lead role and model set when offered.
+4. **Lead model:** the model and reasoning level of your chats, which every worker also opens with. Press **Enter** to accept the one shown, or type `edit` to choose another.
+5. **GitHub repository URL:** enter the project URL you chose, or press **Enter** only if you explicitly chose to defer it and start with an idea in **Start here**.
+6. **Boat:** approve the device login if prompted, select the worker environment you prepared and confirm the repository attachment if prompted.
 
 Setup then checks the connections on a temporary VM, deletes it and finishes with **Setup verified**. For an attached repository, the check must authenticate to GitHub from that VM and read the repository's refs; access only on the T3 server is not enough.
 
 An AI installer must not answer the playbook, lead role, model set, lead model or repository prompts for the owner. It must pause at each undecided choice. After setup, it must run `docker exec t3-boat t3-boat status` and report the exact profile; playbook name, version and commit or `none`; lead role and model set when present; lead model; repository URL or an explicit defer; Boat environment and credential profile; providers and models that replied; the temporary VM ID and confirmed deletion; and whether that VM read the selected repository's refs. It must not report repository setup as complete while status says access is deferred.
 
-**Change it later.** Run the same setup command again to change the lead model (type `edit`), attach another playbook or detach it with `none`, or add a repository by entering its URL. Where setup shows a saved default, press **Enter** to keep it. To check the installation without starting a VM, run `docker exec t3-boat t3-boat status`.
+**Change it later.** Run the same setup command again. Keep the saved provider profile or explicitly choose to change its subscriptions, change the lead model (type `edit`), attach another playbook or detach it with `none`, or add a repository by entering its URL. Where setup shows a saved default, press **Enter** to keep it. To check the installation without starting a VM, run `docker exec t3-boat t3-boat status`.
 
 ### 4. Connect your devices and open your first chat
 

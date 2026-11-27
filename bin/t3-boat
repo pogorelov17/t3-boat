@@ -19,7 +19,7 @@ import boat_profile
 import playbook
 import playbook_fetch
 import playbook_pin
-from boat_profile import PARENT, read_profile, read_state, write
+from boat_profile import PARENT, read_profile, read_selection, read_state, select_profile, write
 from model_picker import configure
 
 # The provider subscriptions of each profile, with the names used for sign-in and Boat subscriptions.
@@ -224,6 +224,35 @@ def menu_choice(reply, names):
     return reply if reply in names else None
 
 
+def yes_no(question, default=None):
+    """Require an explicit yes/no answer unless an existing setup supplies a displayed default."""
+    suffix = " [Y/n]: " if default is True else " [y/N]: " if default is False else " [yes/no]: "
+    while True:
+        reply = input(question + suffix).strip().lower()
+        if not reply and default is not None:
+            return default
+        if reply in ("y", "yes"):
+            return True
+        if reply in ("n", "no"):
+            return False
+        print("Enter yes or no.")
+
+
+def choose_provider_profile(current=None):
+    """Ask the owner which subscriptions to connect; an installer-supplied environment is never a choice."""
+    if current is not None:
+        print(f"Current provider profile: {current}")
+        if not yes_no("Change the connected provider subscriptions?", False):
+            return current
+    codex = yes_no("Connect Codex using your ChatGPT subscription?")
+    claude = yes_no("Connect Claude Code using your Claude subscription?")
+    if not codex and not claude:
+        raise SetupError("At least one provider subscription is required. Provider setup was not changed.")
+    if codex and claude:
+        return "codex+claude"
+    return "codex-only" if codex else "claude-only"
+
+
 def choose_lead_role(package, current):
     """Ask which of the package's roles the T3 team lead follows, if any. Only an earlier choice is a default:
     no role name means anything to T3 Boat."""
@@ -353,7 +382,16 @@ def choose_playbook(profile, current):
         return {"path": str(package.root), "model_set": model_set, "lead_role": lead_role}, package
 
 
-def setup(profile, providers):
+def setup(profile=None, providers=None):
+    if profile is None:
+        current = read_selection(missing=None)
+        profile = choose_provider_profile(current)
+        providers = PROFILES[profile]
+        if profile != current:
+            select_profile(profile)
+        print(f"Provider profile: {profile}")
+    elif providers is None:
+        providers = PROFILES[profile]
     if not t3_online():
         raise SetupError("T3 is starting or unreachable. Check docker logs t3-boat and retry setup.")
     # Name an unreadable saved profile before installing anything or asking for a sign-in. An attached package
@@ -496,15 +534,25 @@ def status(profile, providers):
     return 0
 
 
+def unconfigured_status():
+    ready = t3_online()
+    print(f"[{'ok' if ready else 'missing'}] T3 HTTP server")
+    print("Playbook: not selected")
+    print("[missing] Provider profile selected")
+    print("Next: docker exec -it t3-boat t3-boat setup")
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("serve", "setup", "status"))
     args = parser.parse_args()
-    profile = os.environ.get("T3_BOAT_PROFILE", "")
-    if profile not in PROFILES:
-        parser.error("set T3_BOAT_PROFILE to " + ", ".join(PROFILES))
+    profile = read_selection(missing=None)
     if args.command == "serve":
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "lib/boat_profile.py"), profile],
+        command = [sys.executable, str(Path(__file__).resolve().parents[1] / "lib/boat_profile.py")]
+        if profile is not None:
+            command.append(profile)
+        result = subprocess.run(command,
                                 stderr=subprocess.PIPE, text=True)
         if result.returncode:
             *earlier, detail = result.stderr.rstrip("\n").split("\n")
@@ -521,7 +569,10 @@ def main():
     if args.command == "setup":
         with (Path.home() / ".boat-setup.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            setup(profile, PROFILES[profile])
+            setup()
+        profile = read_selection()
+    if profile is None:
+        return unconfigured_status()
     return status(profile, PROFILES[profile])
 
 
