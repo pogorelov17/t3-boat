@@ -33,15 +33,34 @@ def without_pin_table(path):
 
 
 class AuditTests(unittest.TestCase):
-    def test_ai_installer_asks_the_owner_to_choose_the_profile_before_commands(self):
+    def test_ai_installer_waits_for_owner_choices_before_commands(self):
         readme = (ROOT / "README.md").read_text()
         start = readme.index("**Installing with an AI agent?**")
         requirements = readme.index("You need a Linux server")
         rule = readme[start:requirements]
-        self.assertIn("Before it runs any command, it must ask", rule)
-        self.assertIn("must not infer", rule)
-        for outcome in ("codex-only", "claude-only", "codex+claude", "Neither: stop the installation"):
+        self.assertIn("Before it runs any command, it must ask for and wait for your explicit choices", rule)
+        self.assertIn("not consent to choose any of them", rule)
+        self.assertIn("must not infer answers", rule)
+        for outcome in ("codex-only", "claude-only", "codex+claude", "neither stops the installation"):
             self.assertIn(outcome, rule)
+        for choice in ("no playbook", "suggested `agent-playbook`", "custom package path",
+                       "explicitly defer it", "only the installation source"):
+            self.assertIn(choice, rule)
+
+    def test_ai_installer_cannot_silently_choose_playbook_or_repository(self):
+        readme = (ROOT / "README.md").read_text()
+        playbook = readme[readme.index("### 2. Choose a playbook"):readme.index("### 3. Connect your accounts")]
+        setup = readme[readme.index("### 3. Connect your accounts"):readme.index("### 4. Connect your devices")]
+        self.assertIn("wait for the owner", playbook)
+        for choice in ("enter `agent-playbook`", "choose a lead role", "choose a model set"):
+            self.assertIn(choice, playbook)
+        self.assertIn("complete both sides", setup)
+        self.assertIn("**T3:**", setup)
+        self.assertIn("**Boat:**", setup)
+        self.assertIn("must not silently defer", setup)
+        self.assertIn("read the repository's refs", setup)
+        self.assertIn("must pause at each undecided choice", setup)
+        self.assertIn("status says access is deferred", setup)
 
     def test_remote_server_uses_connect_before_an_explicit_verified_ssh_fallback(self):
         readme = (ROOT / "README.md").read_text()

@@ -61,12 +61,11 @@ Your server hosts T3 and handles worker provisioning and cleanup. The lead can p
 
 ## Quick start
 
-**Installing with an AI agent?** Before it runs any command, it must ask which subscriptions you want to connect. It must not infer the answer from the agent doing the installation.
+**Installing with an AI agent?** Before it runs any command, it must ask for and wait for your explicit choices of provider profile, playbook and project. A request to install T3 Boat is not consent to choose any of them. It must not infer answers from the agent doing the installation or from a repository URL in the install request.
 
-- Codex with ChatGPT only: use `codex-only`.
-- Claude Code with Claude only: use `claude-only`.
-- Both: use `codex+claude`.
-- Neither: stop the installation.
+- **Provider profile:** Codex with ChatGPT only uses `codex-only`; Claude Code with Claude only uses `claude-only`; both use `codex+claude`; neither stops the installation.
+- **Playbook:** choose no playbook, the suggested `agent-playbook`, or a custom package path. The agent must not download or attach one until you choose it. If you attach one, the agent must also show you its available lead roles and model sets and wait for those choices.
+- **Project:** provide the GitHub repository you want workers to use, or explicitly defer it and start with an idea. The T3 Boat repository named in an install request is only the installation source unless you explicitly select it as your project.
 
 You need a Linux server with curl and [Docker Engine](https://docs.docker.com/engine/install/) (AMD64 or ARM64), a Boat account that can start a small VM, a GitHub account and the subscriptions for your profile. A repository is optional.
 
@@ -97,6 +96,8 @@ Use a fresh data volume for a clean install. If another container uses `t3-boat-
 
 Setup asks for a playbook right after sign-in, so decide before you run it. Without one, the lead briefs a generic worker for each task and decides how many to start and in what order. A playbook is an external package, a `team.json` manifest with role guides, that defines the roles, their instructions, their sequence and optionally their models. T3 Boat reads it as data and only launches its workers. It applies to every project of this profile and adds nothing to your repositories.
 
+An AI installer must stop before the **Playbook** prompt, present the choices below and wait for the owner. It must not press **Enter**, enter `agent-playbook`, choose a lead role or choose a model set on the owner's behalf. It may recommend a choice and explain it.
+
 At the **Playbook** prompt, enter one of these:
 
 - **Enter** for none: a generic worker. This is the default on a fresh install.
@@ -113,7 +114,12 @@ When you attach a package, setup also asks which of its roles the lead follows a
 
 ### 3. Connect your accounts and verify a worker
 
-Before you start, prepare Boat: choose a private worker environment with GitHub access whose credential profile, under **Agents & Proxying**, connects the same subscriptions as your profile. For repository work, grant the Boat GitHub App **Contents** and **Pull requests** write access. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
+Before you start, decide whether to attach a project now. If you do, complete both sides:
+
+- **T3:** give setup the project's GitHub URL so it creates or attaches the project instead of leaving repository access deferred. Do not reuse the T3 Boat installation URL unless this is the project you explicitly chose.
+- **Boat:** choose a private worker environment whose credential profile, under **Agents & Proxying**, connects the same subscriptions as your profile. Grant the Boat GitHub App access to this repository with **Contents** and **Pull requests** write permissions. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
+
+If you are not ready to choose a repository, explicitly defer it and use **Start here**. An AI installer must ask which path you want and wait; it must not silently defer the repository or substitute the installation repository.
 
 ```sh
 docker exec -it t3-boat t3-boat setup
@@ -122,12 +128,14 @@ docker exec -it t3-boat t3-boat setup
 Setup asks, in this order:
 
 1. **Sign in** to each provider of your profile. Valid sessions are reused.
-2. **Playbook:** press **Enter** for a generic worker, or enter your choice from [step 2](#2-choose-a-playbook-optional).
+2. **Playbook:** press **Enter** for a generic worker, or enter your explicit choice from [step 2](#2-choose-a-playbook-optional). For an attached playbook, explicitly choose its lead role and model set when offered.
 3. **Lead model:** the model and reasoning level of your chats, which every worker also opens with. Press **Enter** to accept the one shown, or type `edit` to choose another.
-4. **GitHub repository URL:** enter a project URL, or press **Enter** to start with an idea in **Start here**.
-5. **Boat:** approve the device login if prompted, then select your worker environment. If prompted, confirm the repository attachment.
+4. **GitHub repository URL:** enter the project URL you chose, or press **Enter** only if you explicitly chose to defer it and start with an idea in **Start here**.
+5. **Boat:** approve the device login if prompted, select the worker environment you prepared and confirm the repository attachment if prompted.
 
-Setup then checks the connections on a temporary VM, deletes it and finishes with **Setup verified**.
+Setup then checks the connections on a temporary VM, deletes it and finishes with **Setup verified**. For an attached repository, the check must authenticate to GitHub from that VM and read the repository's refs; access only on the T3 server is not enough.
+
+An AI installer must not answer the playbook, lead role, model set, lead model or repository prompts for the owner. It must pause at each undecided choice. After setup, it must run `docker exec t3-boat t3-boat status` and report the exact profile; playbook name, version and commit or `none`; lead role and model set when present; lead model; repository URL or an explicit defer; Boat environment and credential profile; providers and models that replied; the temporary VM ID and confirmed deletion; and whether that VM read the selected repository's refs. It must not report repository setup as complete while status says access is deferred.
 
 **Change it later.** Run the same setup command again to change the lead model (type `edit`), attach another playbook or detach it with `none`, or add a repository by entering its URL. Where setup shows a saved default, press **Enter** to keep it. To check the installation without starting a VM, run `docker exec t3-boat t3-boat status`.
 
