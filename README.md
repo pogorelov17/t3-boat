@@ -61,6 +61,13 @@ Your server hosts T3 and handles worker provisioning and cleanup. The lead can p
 
 ## Quick start
 
+**Installing with an AI agent?** Before it runs any command, it must ask which subscriptions you want to connect. It must not infer the answer from the agent doing the installation.
+
+- Codex with ChatGPT only: use `codex-only`.
+- Claude Code with Claude only: use `claude-only`.
+- Both: use `codex+claude`.
+- Neither: stop the installation.
+
 You need a Linux server with curl and [Docker Engine](https://docs.docker.com/engine/install/) (AMD64 or ARM64), a Boat account that can start a small VM, a GitHub account and the subscriptions for your profile. A repository is optional.
 
 ### 1. Start the container

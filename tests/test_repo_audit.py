@@ -33,6 +33,16 @@ def without_pin_table(path):
 
 
 class AuditTests(unittest.TestCase):
+    def test_ai_installer_asks_the_owner_to_choose_the_profile_before_commands(self):
+        readme = (ROOT / "README.md").read_text()
+        start = readme.index("**Installing with an AI agent?**")
+        requirements = readme.index("You need a Linux server")
+        rule = readme[start:requirements]
+        self.assertIn("Before it runs any command, it must ask", rule)
+        self.assertIn("must not infer", rule)
+        for outcome in ("codex-only", "claude-only", "codex+claude", "Neither: stop the installation"):
+            self.assertIn(outcome, rule)
+
     def test_shipped_files_name_no_package_role_family_or_review_rule(self):
         for path in SHIPPED:
             text = without_pin_table(path)
