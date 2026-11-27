@@ -4,39 +4,12 @@
 
 <p align="center">
   <a href="https://github.com/pogorelov17/t3-boat/actions/workflows/release.yml"><img alt="CI" src="https://github.com/pogorelov17/t3-boat/actions/workflows/release.yml/badge.svg?branch=main"></a>
-  <a href="#1-build-the-image"><img alt="amd64 + arm64" src="https://img.shields.io/badge/docker-amd64%20%2B%20arm64-0284c7?logo=docker&amp;logoColor=white"></a>
+  <a href="https://hub.docker.com/r/pogorelov17/t3-boat"><img alt="amd64 + arm64" src="https://img.shields.io/badge/docker-amd64%20%2B%20arm64-0284c7?logo=docker&amp;logoColor=white"></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> · <a href="#1-build-the-image">Build the image</a> · <a href="https://github.com/pogorelov17/agent-playbook">Agent Playbook ↗</a>
+  <a href="#quick-start">Quick start</a> · <a href="https://github.com/pogorelov17/t3-boat/releases/latest">Latest release ↗</a> · <a href="https://hub.docker.com/r/pogorelov17/t3-boat">Docker Hub ↗</a> · <a href="https://github.com/pogorelov17/agent-playbook">Agent Playbook ↗</a>
 </p>
-
-```mermaid
-%%{init: {"flowchart": {"curve": "stepAfter", "rankSpacing": 26, "nodeSpacing": 22}}}%%
-flowchart TB
-    A(["Owner · Request"]):::endpoint
-    B["T3 Code · Lead<br/>Discuss, plan, write a brief"]:::lead
-    C["Boat · Start a fresh worker VM"]:::lead
-
-    subgraph VM["Worker VM"]
-        D["Worker follows the brief<br/>on its own checkout"]:::work
-        R["Returns a result:<br/>what the brief asked for"]:::work
-        D --> R
-    end
-
-    F["Lead posts a compact update<br/>and releases the VM"]:::lead
-    G(["Owner · Result"]):::endpoint
-
-    A --> B --> C --> D
-    R --> F
-    F -->|Work complete| G
-    F -.->|Next brief| B
-
-    classDef lead fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
-    classDef work fill:#f0fdfa,stroke:#0d9488,color:#134e4a
-    classDef endpoint fill:#f5f3ff,stroke:#8b5cf6,color:#4c1d95
-    style VM fill:#f8fafc,stroke:#cbd5e1,stroke-dasharray:5 5,color:#64748b
-```
 
 Coordinate coding agents across your GitHub projects from one Linux machine, local or remote. Bring an idea or an existing repository and work from a T3 chat with Codex, Claude or both. The code itself runs on disposable Boat VMs.
 
@@ -44,62 +17,41 @@ Coordinate coding agents across your GitHub projects from one Linux machine, loc
 
 Suppose you ask in T3, “Fix the failing test and show me why it broke.”
 
-1. **The team lead talks with you in T3.** It discusses, plans and checks a fact on the web when needed. New chats in all your projects inherit your installation’s lead model and reasoning level. While you are still discussing an idea, the conversation stays in T3 until there is work for a worker.
-2. **Workers run on Boat.** The lead starts a worker on a disposable VM and gives it a brief it writes for this task: here, reproduce the failure, fix it, run the tests and deliver the fix the way you asked, for example as a pull request. What a worker delivers, and in what form, comes from its brief or from an [attached playbook](#optional-playbook); T3 Boat sets no branch, pull request or review rule of its own. Everything that touches the repository runs there: reading source, edits, installs, builds, tests and extended research. Your machine only hosts T3 and its history. The lead decides how many workers to use and what each does.
-3. **The parent chat stays compact.** For each delegation, result and decision, the lead posts who asked whom for what, known dependencies, the result and what it decided, with links to the child chat and what it delivered instead of shell logs. It reports what it observed, in the same form with or without a playbook; T3 shows a child’s link and the result it returns, not its live progress.
-4. **You decide what happens next.** Once a worker’s result is recorded, its VM is deleted. You can come back to the chat or ask for another change without keeping workers running.
-
-Prefer a fixed team? [Attach a playbook](#optional-playbook): an external package such as [agent-playbook](https://github.com/pogorelov17/agent-playbook), or your own, that defines the roles, their instructions, how many of each run and on which models. T3 Boat only launches its workers.
+1. **The team lead talks with you in T3.** It discusses, plans and checks a fact on the web when needed. Until there is work for a worker, the conversation stays in T3.
+2. **Workers run on Boat.** The lead starts a worker on a fresh VM and writes it a brief for this task: here, reproduce the failure, fix it, run the tests and deliver the fix the way you asked, for example as a pull request. Everything that touches the repository runs on the VM: reading source, edits, installs, builds, tests and extended research. Your machine only hosts T3 and its history. What a worker delivers comes from its brief or an [attached playbook](#optional-playbook); T3 Boat sets no branch, pull request or review rule of its own.
+3. **The parent chat stays compact.** For each delegation, result and decision, the lead posts who asked whom for what, known dependencies, the result and its decision, with links to the child chat and what it delivered instead of shell logs.
+4. **You decide what happens next.** Once a worker’s result is recorded, its VM is deleted.
 
 ## Quick start
 
-You need a Linux machine with Docker Engine (the server, which runs T3), a Boat account that can start a small VM, a GitHub account, and the subscriptions enabled in your profile. To build the image you also need Git and Docker on a computer of your own. A repository is optional. The image supports AMD64 and ARM64. [Install Docker Engine](https://docs.docker.com/engine/install/).
+You need a Linux server with [Docker Engine](https://docs.docker.com/engine/install/) (AMD64 or ARM64), a Boat account that can start a small VM, a GitHub account and the subscriptions for your profile. A repository is optional.
 
-### 1. Build the image
+### 1. Start the container
 
-Build the image from the same source as the README you are reading, so the image and these instructions match. Release images on Docker Hub are built from release tags; an older one follows the README at its own tag, not this one.
-
-Build on your own computer rather than on the server. The server then only runs the container and keeps T3 and its history: no source checkout or build runs there. Set `--platform` to the server’s architecture: `linux/amd64`, or `linux/arm64` for an ARM server. Docker Desktop builds either one; on Docker Engine, building for another architecture needs [QEMU emulation](https://docs.docker.com/build/building/multi-platform/#qemu).
+Run this on the server. It looks up the [latest release](https://github.com/pogorelov17/t3-boat/releases/latest) and pulls its image from Docker Hub:
 
 ```sh
-git clone https://github.com/pogorelov17/t3-boat.git
-cd t3-boat
-git checkout COMMIT   # the commit of this README; skip it to build the default branch
-docker build --platform linux/amd64 -t t3-boat:local .
-docker save t3-boat:local | ssh USER@SERVER docker load
+VERSION=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/pogorelov17/t3-boat/releases/latest |
+  sed -n 's|.*/releases/tag/v\([0-9][0-9.]*\)$|\1|p')
+echo "T3 Boat ${VERSION:?could not resolve the latest release}" &&
+  docker pull "pogorelov17/t3-boat:$VERSION"
 ```
 
-If T3 runs on the computer you built on, skip `docker save`: the image is already there. Either way, you can delete the checkout after the build; the container never uses it.
-
-<details>
-<summary><strong>Use the image CI built and tested instead</strong></summary>
-
-Every pull request and every commit on the default branch builds the image for both architectures and runs the image smoke test on it. The tested image is kept as a workflow artifact for 7 days. With the GitHub CLI signed in on your computer, download the one for your server’s architecture (`tested-amd64` or `tested-arm64`) from a successful run of **Test and release Docker image** for the commit you want, then load it on the server:
-
-```sh
-gh run download RUN_ID --repo pogorelov17/t3-boat --name tested-amd64
-zstd -dc image.tar.zst | ssh USER@SERVER 'docker load && docker tag t3-boat:test t3-boat:local'
-```
-
-`RUN_ID` is the number at the end of the run’s URL. If T3 runs on the computer you downloaded to, load it there instead: `zstd -dc image.tar.zst | docker load && docker tag t3-boat:test t3-boat:local`.
-
-</details>
-
-### 2. Start the container
-
-Run this on the server. Set `T3_BOAT_PROFILE` to `codex-only`, `claude-only`, or `codex+claude`. T3 uses the container hostname as its display name. The example uses the server’s short hostname so you can recognize it on your devices.
+Set `T3_BOAT_PROFILE` to `codex-only`, `claude-only` or `codex+claude`, then start it on a new volume. T3 shows the container hostname as its display name.
 
 ```sh
 docker run -d --name t3-boat --hostname "$(hostname -s)" --restart unless-stopped \
   -p 127.0.0.1:3773:3773 \
   -v t3-boat-data:/data \
   -e T3_BOAT_PROFILE=codex+claude \
-  t3-boat:local
+  "pogorelov17/t3-boat:${VERSION:?run the commands above first}"
 ```
 
-### 3. Connect your accounts and verify a worker
+To pin a version instead, set `VERSION` to a number from [Releases](https://github.com/pogorelov17/t3-boat/releases), such as `VERSION=0.2.0`. Each release links the Quick start at its own tag; this README on the default branch can describe changes that are not released yet.
 
-Run this on the server. The live check uses a small Boat VM and one short model request per enabled provider.
+**Fresh installations only.** Start each new version on a new volume, for example `-v t3-boat-data-2:/data`. A volume from another version is not converted: the container stops with a one-line message and leaves the volume unchanged, so you keep its chat history.
+
+### 2. Connect your accounts and verify a worker
 
 ```sh
 docker exec -it t3-boat t3-boat setup
@@ -111,145 +63,86 @@ docker exec -it t3-boat t3-boat setup
 | `claude-only` | Claude Code with Claude | Claude subscription |
 | `codex+claude` | Both | Both subscriptions |
 
-1. Follow the login prompts. Existing valid sessions are reused. For Claude profiles, setup keeps an installed Claude Code that is the pinned version or newer. If `claude --version` fails or prints nothing, setup reinstalls the pinned version. If it prints a version setup cannot read, setup leaves Claude Code unchanged and prints a warning. After sign-in, setup asks whether to attach a [playbook](#optional-playbook); press **Enter** for none, or enter `agent-playbook` to download and attach the suggested [agent-playbook](https://github.com/pogorelov17/agent-playbook) at its pinned commit. It then shows the **lead model**: the model and reasoning level of your chats, which every worker also opens with. Choose one, or press **Enter** to accept the one shown. Nothing is saved until you accept it. At **GitHub repository URL**, enter a project URL or press **Enter** to open **Start here** with your own idea.
-2. Approve the Boat device login if prompted. In Boat, connect GitHub. Open **Agents & Proxying**, select your worker credential profile and connect the subscriptions in the table. Boat supplies these logins to new VMs. Select a private worker environment that passes GitHub and agent credentials and uses that credential profile. For a repository, grant the Boat GitHub App access to that repository with **Contents** and **Pull requests** write permissions. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
-3. Setup starts a fresh VM, authenticates to GitHub from it and requests one reply from each enabled provider: the lead model for its own provider, and the CLI’s default model for any other provider. If you supplied a repository, it also reads its Git refs from that VM. Look for each success line, the deleted VM ID and **Setup verified**. If a check fails, fix the reported connection and rerun setup.
+1. Follow the login prompts; valid sessions are reused. Setup then asks for a [playbook](#optional-playbook) (press **Enter** for none) and the **lead model**: the model and reasoning level of your chats, which every worker also opens with. At **GitHub repository URL**, enter a project URL or press **Enter** to start in **Start here** with an idea.
+2. Approve the Boat device login if prompted. In Boat, connect GitHub, open **Agents & Proxying**, select your worker credential profile and connect the subscriptions in the table. Select a private worker environment that passes GitHub and agent credentials and uses that profile. For a repository, grant the Boat GitHub App **Contents** and **Pull requests** write access to it. [Boat environments](https://docs.boat.dev/environments/access) · [Worker subscriptions](https://docs.boat.dev/ai-credentials)
+3. Setup starts a fresh VM, authenticates to GitHub from it, requests one reply from each enabled provider and, for a repository, reads its Git refs. Look for the success lines, the deleted VM ID and **Setup verified**. If a check fails, fix the reported connection and rerun setup.
 
-**Installing with an AI agent?** Get the image as [step 1](#1-build-the-image) describes, built on another computer or downloaded from CI, rather than building on the server. Have the account owner complete browser confirmations directly. Report the profile, the local logins, the VM ID and deletion, the providers and models that replied, and the repository checked or deferred. Complete the first-chat check below. After reporting the results, offer the [optional phone setup](#connect-your-phone-optional) with the environment name you verified. If you know the owner’s platform, mention its store. Otherwise, offer both iOS and Android. A running container alone is only the first step.
+`docker exec t3-boat t3-boat status` shows the local logins, Boat configuration and last successful check without starting a VM. Rerun setup to add a repository, or to change the playbook or lead model.
 
-### 4. Open your first chat
+**Installing with an AI agent?** Have the account owner complete browser confirmations directly. Report the profile, the local logins, the VM ID and its deletion, the providers and models that replied, and the repository checked or deferred. Then complete the first chat below and offer the [phone setup](#connect-your-phone-optional). A running container alone is only the first step.
 
-In T3, select your repository, or **Start here** if you skipped the URL, and open a new chat. Write in your own words, in any language. You can ask a question, share an idea, or use an opening message suggested by the agent helping you get set up.
+### 3. Open your first chat
 
-<details>
-<summary><strong>First time connecting this computer?</strong></summary>
-
-If T3 runs on this computer, skip the SSH command and create the pairing link directly in a local terminal. For a remote machine, use SSH port forwarding. In a terminal on your computer, replace `USER@SERVER` with your SSH login and connect:
+**First time connecting this computer?** For a remote server, forward the port from your computer and keep this session open:
 
 ```sh
 ssh -L 127.0.0.1:3773:127.0.0.1:3773 -o ExitOnForwardFailure=yes USER@SERVER
 ```
 
-On the machine running Docker, get a pairing link:
+Then, on the server, create a pairing link:
 
 ```sh
 docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url http://127.0.0.1:3773
 ```
 
-For the desktop app, open **Settings → Environments → Add environment → Remote link** and paste the pairing URL. Opening the URL in a browser pairs that browser. Issue a fresh code to pair another client. For a remote machine, keep the SSH session open while using port forwarding. Closing that session or putting the computer to sleep interrupts this route. The container and chat history stay on the server. Run the SSH command again to reconnect to the same installation.
+In the desktop app, open **Settings → Environments → Add environment → Remote link** and paste the URL, or open it in a browser to pair that browser. Issue a fresh link for each client.
 
-After a server rebuild, verify the new SSH host key fingerprint at the machine’s console before updating the saved key on your computer. If the installation also has a fresh data volume, pair the client to its new T3 environment.
-
-</details>
+In T3, select your repository, or **Start here**, and open a new chat. Write in your own words, in any language. A reply confirms your client reaches the team lead. When you are ready, ask for a change and say how you want it delivered, for example as a pull request; the parent chat records the worker’s model, test results and what it delivered.
 
 <details>
 <summary><strong>Keep T3 reachable when you close your laptop (T3 Connect)</strong></summary>
 
-Pair your desktop app using the steps above first. On the server, link the container to your T3 Connect account. Follow the device approval prompt in your browser.
+After pairing, link the container to your T3 Connect account and follow the browser prompt. Then restart the container, between tasks, to apply the link:
 
 ```sh
 docker exec -it t3-boat t3 connect --headless
-```
-
-Once authorized, restart the container to apply the link. Do this between tasks. Docker already manages the server process if the CLI mentions a user-systemd service.
-
-```sh
 docker restart t3-boat
 docker exec t3-boat t3 connect status --base-dir /data/.t3
 ```
 
-Provisioning can take a moment. Repeat the status command until it reports **Other devices can reach this machine** and **Tunnel connected**. In the desktop app’s **Settings → Environments**, add **T3 Connect** as a route for the paired server. Close the SSH forward if you opened one, confirm the environment shows **via T3 Connect**, then send a message in a new chat. A reply confirms the route end to end. The tunnel runs on the server while your laptop sleeps.
-
-A fresh data volume creates a new T3 environment. If an older entry shows **tunnel is offline**, select the newly paired environment.
+Repeat the status command until it reports **Other devices can reach this machine** and **Tunnel connected**. In the desktop app’s **Settings → Environments**, add **T3 Connect** as a route for the paired server, confirm it shows **via T3 Connect** and send a message in a new chat. A fresh data volume is a new T3 environment: pair it again.
 
 </details>
 
-If you are unsure where to begin, ask the team lead for ideas. Wait for a reply in the new chat to confirm your client can reach the team lead. Planning can continue there until you choose a repository.
-
-## Build your first feature
-
-1. **Choose the repository for this change.** Use the URL of any GitHub repository you can work on. For a brand-new project, initializing the repository with a README gives it a first commit to build on.
-2. **Attach the repository.** If you supplied its URL during setup, continue to step 3. Otherwise rerun `docker exec -it t3-boat t3-boat setup` and enter the URL. Setup checks read access from a fresh VM; write access is first used when a worker delivers a change.
-3. **Continue the conversation.** Use your project chat. If you began in **Start here**, attaching the first repository keeps your planning thread there. When you are ready, ask for the first change you want and say how you want it delivered, for example as a pull request. A worker implements it on Boat, checks the result and delivers it as its brief says. The parent chat records the worker’s model, test results and the identifiers of what it delivered. With a playbook attached, its roles decide what happens next, such as reviews on separate VMs.
-
-To work on another repository, rerun setup with its URL. To inspect current local logins, Boat configuration and the timestamp of the last successful VM check, run `docker exec t3-boat t3-boat status`. Status does not allocate a VM. Rerun setup for a fresh check after changing profiles, credentials or models.
-
 ## Models
 
-`T3_BOAT_PROFILE` selects the subscriptions T3 Boat uses: `codex-only`, `claude-only` or `codex+claude`. Setup saves one model for the profile, the **lead model**: the model and reasoning level of your T3 chats, in every project on this machine. Every worker VM opens with the same model and has every provider of the profile enabled, so the lead can pick another model and reasoning level that T3 lists for each brief, and names its choice in the parent chat.
-
-Setup lists the exact model IDs and reasoning levels that T3 reports for your signed-in providers. Without a playbook nothing is preselected. With a playbook whose model set assigns a model to the role you chose for the lead, setup suggests the newest stable release of that family that supports its reasoning level.
-
-**Change your choices later.** Run `docker exec -it t3-boat t3-boat setup` again. Setup keeps your saved lead model until you type `edit`, or `refresh` to take the playbook’s suggestion. If the model or reasoning level is no longer available, setup asks for a replacement before continuing. The choices are saved in `/data/profiles/PROFILE.json`.
+Setup lists the model IDs and reasoning levels T3 reports for your signed-in providers and saves your choice as the lead model in `/data/profiles/PROFILE.json`. Every worker VM opens with that model and has every provider of the profile enabled, so the lead can choose another listed model for each brief and names its choice in the parent chat. Rerun setup and type `edit` to change it.
 
 ## Optional playbook
 
-A playbook is an external package of role instructions in the format of [agent-playbook](https://github.com/pogorelov17/agent-playbook): a `team.json` manifest (schema 1) that lists each role, the ordered Markdown files of its instructions and how many instances of it run, plus optional model sets that give each role a provider, model family and reasoning level. T3 Boat reads the package as data and never runs code from it. Role names, counts, model assignments, model rules and every workflow instruction come from the package; T3 Boat adds only how to start a worker on Boat, the machine boundary and the compact parent updates.
+A playbook is an external package, in the format of [agent-playbook](https://github.com/pogorelov17/agent-playbook), that defines roles, their instructions, how many of each run and on which models. T3 Boat reads it as data, never runs code from it, and adds only how to start a worker on Boat and the compact parent updates. When setup asks for a playbook, enter:
 
-When setup asks for a playbook, enter:
+- **Enter** for none, or to keep the current one; `none` detaches it.
+- `agent-playbook` for the version of agent-playbook pinned in this T3 Boat release. Setup downloads it into `/data/teams` and checks every file against the pin; later runs reuse it offline. It does not follow agent-playbook’s main branch.
+- The absolute path of a package directory in the container, such as `/data/teams/my-team`.
 
-- **Enter** for none, or to keep the one already attached, and `none` to detach it;
-- `agent-playbook` for the suggested playbook, https://github.com/pogorelov17/agent-playbook at commit `a27b16a7d696` (the commit named in `lib/playbook_pin.py`). Setup downloads that commit with git into `/data/teams/agent-playbook-a27b16a7d696` and attaches it like any other path, with no `git clone` or `docker cp` on your machine. Only this choice downloads anything. The download is data: setup writes the commit's files as plain, non-executable files and runs nothing from them, and it refuses links, submodules and a commit that is not a valid package. If the download fails, for example offline, setup says why, changes nothing and asks again: retry, keep your current choice, choose none or enter a path. Later starts read the downloaded folder from the volume and need no network. Entering `agent-playbook` again reuses that folder offline, after checking every file in it against the pinned commit's file list: the same files, each a plain file (no links) with the pinned git blob ID and SHA-256. A `.commit` file alone proves nothing. If a file was changed, added or removed, or is a link, setup names it, attaches nothing and leaves the folder exactly as it is: enter its path to attach it as your own package, or move it away and enter `agent-playbook` to download the pinned commit again. Setup, status and the lead's skill name a commit only for a folder that holds exactly the pinned release; any other package with a `.commit` file is shown with `unverified commit`;
-- the absolute path of any package directory inside the container. To use your own, copy it into the volume and hand it to the container user, then enter `/data/teams/my-team`. Every container start creates `/data/teams` for this;
-- `bundled`, only in an image [built with a bundled playbook](#build-a-customized-image), for its copy of agent-playbook. The default image contains no playbook.
+To use agent-playbook’s current main branch, clone it into the volume and enter `/data/teams/agent-playbook-main`:
+
+```sh
+docker exec t3-boat git clone --depth 1 https://github.com/pogorelov17/agent-playbook /data/teams/agent-playbook-main
+```
+
+To use your own package, copy it in and make the container user its owner, then enter `/data/teams/my-team`:
 
 ```sh
 docker cp ./my-team/. t3-boat:/data/teams/my-team
 docker exec -u 0 t3-boat chown -R node:node /data/teams/my-team
 ```
 
-`docker cp` keeps the numeric owner and the permissions the files have on your machine. The container runs as the `node` user, which must be able to read every file and enter every folder of the package. The `chown` makes it the owner, so a package written under a restrictive umask, such as `077`, or by a user other than UID 1000 still works. Rerun both commands after you change the package on your machine.
+Setup then asks which role the team lead follows and which model set applies; `none` is valid for both. Each role becomes a skill for every project on this machine, and `boat-worker start ROLE` gives a worker that role’s instructions. Changes to a package apply after `docker restart t3-boat`. If a package can no longer be read, T3 still starts without it, and the container log and `t3-boat status` name the problem.
 
-Setup reads the manifest and every file it names in full and checks them before anything is generated: each must be a regular file of UTF-8 text without NUL bytes, at most 1 MiB, each role’s instructions together at most 1 MiB, and the package at most 8 MiB. A malformed file is named. Setup then asks two questions, and preselects only your earlier answer:
+## Build from source
 
-1. **Which role the T3 team lead follows.** Choose any role, or `none` to have the lead brief each role itself. No role name is special.
-2. **Which model set applies.** Setup lists the package’s model sets that use only providers this profile enables. Choose one, or `none` to let the lead pick each worker’s model.
-
-Then, for every project on this machine:
-
-- Every role’s instructions become a skill for each enabled provider in `/data/.codex/skills/` and `/data/.claude/skills/`, named `playbook-PACKAGE-ROLE-ID`. The `playbook-` prefix keeps any package and role names apart from T3 Boat’s own `t3-boat` skill, and the short ID keeps roles such as `qa_bot` and `QA-bot` apart. Nothing is added to your repositories. The team lead is told to load and follow the guide of the role you chose from its first response, and its Boat skill lists every role with its instance count, guide and the selected model assignment, quoted from the package together with its model rules.
-- `boat-worker start ROLE` starts a worker for any role of the package. Its VM receives that role’s instructions in its provider’s global instruction file (`~/.codex/AGENTS.md` for Codex, `~/.claude/CLAUDE.md` for Claude) before it does anything. `boat-worker start` without a role starts a worker that has only the lead’s brief and a short worker note. Codex reads a non-empty `~/.codex/AGENTS.override.md` instead of `AGENTS.md`; if the Boat environment provides one, the instructions are appended to it after its own text.
-- The package is read once at every container start and setup. Workers receive the guides from that same read, so the lead’s skills and its workers always agree. Edits to your own package apply after `docker restart t3-boat`; until then `t3-boat status` reports the profile as not applied.
-- Setup applies the release it showed you. The roles and counts it lists, the model sets you choose from, the lead model it suggests, the lead’s files and the workers’ guides all come from the read made when you entered the path. This holds even if that path, for example a link to your current release, is switched while you answer. Setup saves the path as you entered it, so the next container start or setup reads whatever it names then. Cancelling before you accept the model selection preserves your earlier choice. Once accepted, the choice remains applied even if you cancel a later setup step.
-- If the package can no longer be read, for example a file is missing, unreadable, malformed, not a regular file or not text (a NUL byte), T3 still starts, without the profile: the lead’s instruction file holds only a note that the profile is not applied, the Boat skill and the playbook guides are removed, and `boat-worker start` refuses to start a worker. The container log and `t3-boat status` name the file and the problem. Restore it and restart the container, or rerun setup to attach another package or detach it.
-- Every start and setup first withdraws the record workers start from, then regenerates the lead’s files, and writes a new record only when every file is in place. If that is interrupted, `boat-worker start` refuses until the next start or setup completes, so a worker never gets a guide the lead’s skills do not describe.
-
-Setup writes only skill files it generated itself, which carry a `t3-boat: generated from an attached playbook` line. A file you created at the same path is never replaced and is used as that role’s guide. If something else occupies the path, that guide is not installed, the team lead is not pointed to it, and setup and the container log say so. Files you add to a skill folder stay there. Detaching the playbook removes the generated skills.
-
-T3 Boat’s own skill, `skills/t3-boat/SKILL.md`, is its generated file only when it is a regular file that starts with the `t3-boat` front matter and the `t3-boat: generated from the T3 Boat profile` line; text that merely quotes that line elsewhere does not count. Any other file there, a link to a file or folder, or a file setup cannot read is never replaced, removed or written through, before setup, with a profile or with a package that cannot be read. While a provider the profile enables has such a file, the profile is not applied: T3 starts with the not-ready note, setup stops with the path, and the container log and `t3-boat status` name it. Move it away and restart the container or rerun setup.
-
-If one provider’s skill folder reaches the other’s, for example `/data/.claude/skills` as a link to `/data/.codex/skills`, or both as bind mounts of one host folder (`-v DIR:/data/.codex/skills -v DIR:/data/.claude/skills`), both providers reach the same files. T3 Boat compares paths by the directory entry they name, the device and inode of the folder that holds it plus the file name, not by `realpath`, which tells two bind mounts apart: a file an enabled provider uses is written once and never removed through the other provider’s path, and only generated files that no enabled provider uses are removed. Hard links in different folders are separate entries, so removing one never touches the other. The record workers start from is written only after every generated file is checked again in place.
-
-Each `T3_BOAT_PROFILE` keeps its own lead model and playbook attachment. `t3-boat status` prints the attachment.
-
-<details>
-<summary><strong>Fresh installation required</strong></summary>
-
-This version supports clean installations only. Start it on a new volume, for example `-v t3-boat-data-2:/data`, and run setup. A volume from another version is not converted: a container started on one stops with a one-line message naming the profile file and leaves the file unchanged. Keep that volume as it is if you want its chat history.
-
-</details>
-
-<details>
-<summary><strong>Build a customized image</strong></summary>
-
-To change the packaged tools or workflow instructions, edit your checkout and build it as in [Build the image](#1-build-the-image). The start command already uses `t3-boat:local`.
-
-The default build contains no playbook and never fetches one. To bundle agent-playbook as the `bundled` setup choice, build with `--build-arg BUNDLE_PLAYBOOK=1`: the build then fetches the commit named in `scripts/fetch-playbook`, validates it with the package’s own checker and stores it in the image. To bundle another commit, change `commit` there and, in `lib/playbook_pin.py`, `COMMIT`, its tree ID `TREE` and the file table `FILES` (each file's git mode, blob ID and SHA-256), which setup downloads and checks for the `agent-playbook` choice; the unit tests check that both files name the same commit and that the table hashes to the tree. Any package can instead be attached from the volume without rebuilding.
+To change the packaged tools or instructions, build your own image and use its tag in `docker run`. Add `--build-arg BUNDLE_PLAYBOOK=1` to include agent-playbook as the `bundled` setup choice. Run the unit tests with `python3 -m unittest discover -s tests`.
 
 ```sh
-docker build --build-arg BUNDLE_PLAYBOOK=1 -t t3-boat:local .
+docker build -t t3-boat:custom .
 ```
-
-Add the same `--platform` as for the default build when the server has another architecture.
-
-To run the unit tests from a checkout, run `python3 -m unittest discover -s tests`; to include the checks against agent-playbook itself, first fetch it with `sh scripts/fetch-playbook playbook`. `bash tests/smoke-image.sh IMAGE generic` checks a default image and `bash tests/smoke-image.sh IMAGE bundled` one built with the bundled playbook.
-
-</details>
 
 ## Connect your phone (optional)
 
-1. If you already use T3 Connect on desktop, continue to step 2. Otherwise, enable T3 Connect on the machine running T3 as described in [Open your first chat](#4-open-your-first-chat).
-2. On your phone, open the [official T3 Code site](https://t3.codes/). Under **Also on your phone**, choose **iOS** for the App Store or **Android** for Google Play. Install T3 Code, then open it and sign in with the same T3 account you linked to that machine.
-3. Select your environment through T3 Connect. Open the chat you used during setup and send a message to confirm you can continue it from your phone.
+1. Enable [T3 Connect](#3-open-your-first-chat) on the server if you have not already.
+2. On your phone, open the [official T3 Code site](https://t3.codes/). Under **Also on your phone**, choose **iOS** for the App Store or **Android** for Google Play, then sign in with the same T3 account you linked to the server.
+3. Select your environment through T3 Connect, open the chat you used during setup and send a message.
 
-Keep the machine running T3 awake and online while connecting from your phone.
+Keep the server awake and online while connecting from your phone.
