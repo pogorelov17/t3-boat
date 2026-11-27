@@ -3,7 +3,7 @@
 <p align="center"><strong>Run a team of coding agents on disposable Boat VMs from T3 Code.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/pogorelov17/t3-boat/actions/workflows/release.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/pogorelov17/t3-boat/release.yml?label=CI"></a>
+  <a href="https://github.com/pogorelov17/t3-boat/actions/workflows/release.yml"><img alt="CI" src="https://github.com/pogorelov17/t3-boat/actions/workflows/release.yml/badge.svg?branch=main"></a>
   <a href="#1-build-the-image"><img alt="amd64 + arm64" src="https://img.shields.io/badge/docker-amd64%20%2B%20arm64-0284c7?logo=docker&amp;logoColor=white"></a>
 </p>
 
