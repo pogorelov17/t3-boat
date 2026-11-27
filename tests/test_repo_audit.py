@@ -43,6 +43,17 @@ class AuditTests(unittest.TestCase):
         for outcome in ("codex-only", "claude-only", "codex+claude", "Neither: stop the installation"):
             self.assertIn(outcome, rule)
 
+    def test_remote_server_uses_connect_before_an_explicit_verified_ssh_fallback(self):
+        readme = (ROOT / "README.md").read_text()
+        section = readme[readme.index("### 4. Connect your devices"):]
+        connect = section.index("t3 connect --headless")
+        fallback = section.index("Use a direct SSH route")
+        self.assertLess(connect, fallback)
+        self.assertIn("needs no public port, SSH tunnel or localhost pairing link", section[:fallback])
+        self.assertIn("Creating a pairing link does not open an SSH tunnel", section[:fallback])
+        self.assertIn("ssh -N -L 127.0.0.1:3773:127.0.0.1:3773", section[fallback:])
+        self.assertIn("must never say the tunnel is open unless it started and verified", section[fallback:])
+
     def test_shipped_files_name_no_package_role_family_or_review_rule(self):
         for path in SHIPPED:
             text = without_pin_table(path)

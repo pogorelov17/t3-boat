@@ -131,21 +131,43 @@ Setup then checks the connections on a temporary VM, deletes it and finishes wit
 
 **Change it later.** Run the same setup command again to change the lead model (type `edit`), attach another playbook or detach it with `none`, or add a repository by entering its URL. Where setup shows a saved default, press **Enter** to keep it. To check the installation without starting a VM, run `docker exec t3-boat t3-boat status`.
 
-### 4. Open your first chat
+### 4. Connect your devices and open your first chat
 
-**First time connecting this computer?** For a remote server, forward the port from your computer and keep this session open:
+For a remote server, use T3 Connect. Link the container to the T3 Connect account you want to use on every device:
 
 ```sh
-ssh -L 127.0.0.1:3773:127.0.0.1:3773 -o ExitOnForwardFailure=yes USER@SERVER
+docker exec -it t3-boat t3 connect --headless
 ```
 
-Then, on the server, create a pairing link:
+Open the browser URL it prints, sign in and approve the displayed code. Between tasks, restart the container to apply the link, then check it:
+
+```sh
+docker restart t3-boat
+docker exec t3-boat t3 connect status --base-dir /data/.t3
+```
+
+On each Mac, phone or browser, sign in to the same T3 Connect account and select this environment. The server and container must stay running. This route needs no public port, SSH tunnel or localhost pairing link.
+
+**Installing with an AI agent?** It must offer T3 Connect first for a remote server. It must not create or ask the owner to paste a `127.0.0.1` pairing link unless the owner chooses the direct SSH route below. Creating a pairing link does not open an SSH tunnel.
+
+<details>
+<summary><strong>Use a direct SSH route instead of T3 Connect</strong></summary>
+
+On the client computer, start the port forward and keep this command running:
+
+```sh
+ssh -N -L 127.0.0.1:3773:127.0.0.1:3773 -o ExitOnForwardFailure=yes USER@SERVER
+```
+
+Only after that command remains running without an error, create a pairing link on the server:
 
 ```sh
 docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url http://127.0.0.1:3773
 ```
 
-In the desktop app, open **Settings → Environments → Add environment → Remote link** and paste the URL, or open it in a browser to pair that browser. Issue a fresh link for each client.
+Open the URL on that client, or paste it into **Settings → Environments → Add environment → Remote link**. Issue a fresh link for each client. An installer must never say the tunnel is open unless it started and verified the `ssh -L` command.
+
+</details>
 
 If you skipped the repository URL, open **Start here** to plan your idea. When you are ready to delegate project work, rerun setup with the repository URL.
 
@@ -154,5 +176,3 @@ Open a chat in your repository and describe the task. For example:
 > Fix the failing date test, explain why it broke and open a pull request with the fix.
 
 The lead turns this into a brief for a worker and posts updates like the example at the top of this page. If you attached a playbook, its roles and sequence already apply; you do not need to mention them.
-
-**Phone or another device (optional):** run `docker exec -it t3-boat t3 connect --headless` and follow the browser prompt, restart the container between tasks, then select the T3 Connect route in the T3 Code app on that device.
