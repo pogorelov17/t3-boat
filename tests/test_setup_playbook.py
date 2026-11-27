@@ -68,16 +68,13 @@ class ChoosePlaybookTests(unittest.TestCase):
         self.assertIn("Current playbook: none", output)
         self.assertIn("'bundled' for agent-playbook (version 7.1.0)", output)
 
-    def test_no_role_or_model_set_name_is_a_default_and_each_is_chosen_explicitly(self):
-        # Neither a role named `lead` nor a set named like the profile is preselected.
-        result, output = self.choose("claude-only", None, "bundled", "", "lead", "", "claude-only")
+    def test_conventional_lead_and_exact_provider_set_are_inherited(self):
+        result, output = self.choose("claude-only", None, "bundled")
         self.assertEqual(result, {"path": str(self.bundled), "model_set": "claude-only", "lead_role": "lead"})
-        self.assertIn("Role the T3 team lead follows ('none' for no role): ", output)
-        self.assertIn("Select a listed role by number or name, or 'none'.", output)
-        self.assertIn("Select a listed model set by number or name, or 'none'.", output)
-        self.assertNotIn("[lead]", output)
-        self.assertNotIn("[claude-only]", output)
-        self.assertIn("Model sets that need a provider claude-only does not enable: codex-only", output)
+        self.assertIn("Team lead role: lead (inherited from agent-playbook", output)
+        self.assertIn("Model set: claude-only (inherited from provider profile claude-only)", output)
+        self.assertNotIn("Role the T3 team lead follows", output)
+        self.assertNotIn("Model set ('none'", output)
         self.assertIn("roles lead (1), builder (2)", output)
 
     def test_numbered_options_reach_roles_and_sets_with_numeric_and_reserved_names(self):
@@ -91,8 +88,12 @@ class ChoosePlaybookTests(unittest.TestCase):
                 self.assertEqual(result["model_set"], expected)
 
     def test_none_selects_no_model_set_even_when_one_fits(self):
-        result, _ = self.choose("codex-only", None, str(self.custom), "rigger", "none")
-        self.assertEqual(result, {"path": str(self.custom), "model_set": None, "lead_role": "rigger"})
+        path = write_package(self.home / "teams/ambiguous", sets={
+            "first": {"rigger": {"provider": "codex", "family": "sol", "effort": "high"}},
+            "second": {"rigger": {"provider": "codex", "family": "luna", "effort": "low"}},
+        })
+        result, _ = self.choose("codex-only", None, str(path), "rigger", "none")
+        self.assertEqual(result, {"path": str(path), "model_set": None, "lead_role": "rigger"})
 
     def test_the_bundled_choice_is_offered_only_when_the_image_has_one(self):
         with patch.object(playbook, "BUNDLED", self.home / "absent"):
@@ -105,7 +106,7 @@ class ChoosePlaybookTests(unittest.TestCase):
         broken = write_package(self.home / "teams/broken")
         (broken / "assignments/codex-crew.json").write_text("{")
         result, output = self.choose("codex-only", None, str(self.home / "nowhere"), "teams/harbor", str(broken),
-                                     str(self.custom), "", "rigger", "", "codex-crew")
+                                     str(self.custom), "", "rigger")
         self.assertIn("is not a directory. Enter another path", output)
         self.assertIn("codex-crew.json: Expecting", output)
         self.assertIn("enter an absolute directory path", output)
@@ -119,9 +120,10 @@ class ChoosePlaybookTests(unittest.TestCase):
 
     def test_enter_keeps_the_saved_attachment_and_none_detaches_it(self):
         current = {"path": str(self.custom), "model_set": "codex-crew", "lead_role": "qa_bot"}
-        result, output = self.choose("codex+claude", current, "", "", "")
-        self.assertEqual(result, current)
+        result, output = self.choose("codex+claude", current, "", "")
+        self.assertEqual(result, {"path": str(self.custom), "model_set": "both-providers", "lead_role": "qa_bot"})
         self.assertIn("team lead follows qa_bot", output)
+        self.assertIn("Model set: both-providers (inherited from provider profile codex+claude)", output)
         self.assertEqual(self.choose("codex+claude", current, "none")[0], None)
 
 
@@ -152,7 +154,7 @@ class SetupWithPlaybookTests(unittest.TestCase):
         return code, output.getvalue()
 
     def test_setup_attaches_a_custom_team_and_status_reports_it(self):
-        code, output = self.run_setup("codex+claude", str(self.custom), "cartographer", "both-providers", "", "", "")
+        code, output = self.run_setup("codex+claude", str(self.custom), "cartographer", "", "", "")
         self.assertEqual(code, 0, output)
         self.assertIn("Playbook: harbor-crew (version 7.1.0) at " + str(self.custom)
                       + ", model set both-providers, team lead follows cartographer", output)
@@ -174,7 +176,7 @@ class SetupWithPlaybookTests(unittest.TestCase):
         self.assertIsNone(json.loads((self.home / "profiles/codex-only.json").read_text())["playbook"])
 
     def test_status_names_a_broken_package_and_keeps_the_vm_check_receipt_valid(self):
-        code, _ = self.run_setup("codex-only", str(self.custom), "none", "none", "gpt-6-luna", "", "", "")
+        code, _ = self.run_setup("codex-only", str(self.custom), "none", "gpt-6-luna", "", "", "")
         self.assertEqual(code, 0)
         receipt = cli.read_receipt("codex-only", None)
         # Attaching another playbook does not change what the VM check covered.
@@ -270,7 +272,7 @@ class ReleaseSwitchTests(unittest.TestCase):
             self.assertNotIn(f"RELEASE-{other}", text)
 
     def test_setup_applies_the_release_it_displayed_when_the_link_switches_during_the_prompts(self):
-        output = self.run_setup(str(self.current), self.switching_to("B", "harbor-master"), "crew", "", "", "")
+        output = self.run_setup(str(self.current), self.switching_to("B", "harbor-master"), "", "", "")
         self.assertEqual(os.readlink(self.current), "releases/B")  # The switch happened mid-setup.
         self.assertIn(f"Attaching harbor-crew (version 1.0.0) at {self.current}: roles harbor-master (1), "
                       "rigger (1).", output)
@@ -292,7 +294,7 @@ class ReleaseSwitchTests(unittest.TestCase):
         self.assertIn("[ok] Global profile codex-only applied", self.status()[1])
 
         # Setup offers B's suggestion, and refresh takes it.
-        output = self.run_setup("", "", "", "refresh", "", "", "")
+        output = self.run_setup("", "", "refresh", "", "", "")
         self.assertIn(f"Attaching harbor-crew (version 2.0.0) at {self.current}: roles harbor-master (1), "
                       "rigger (3).", output)
         self.assertIn("Suggested by harbor-crew model set crew for harbor-master: codex luna low", output)
@@ -301,7 +303,7 @@ class ReleaseSwitchTests(unittest.TestCase):
         self.assertIn("[ok] Global profile codex-only applied", self.status()[1])
 
     def test_cancelling_setup_after_the_link_switched_keeps_the_applied_choice(self):
-        self.run_setup(str(self.current), "harbor-master", "crew", "", "", "")
+        self.run_setup(str(self.current), "harbor-master", "", "", "")
         self.assert_release("A", 1, "gpt-6.10-sol")
         files = [self.home / "profiles/codex-only.json", self.home / "profiles/codex-only.applied.json",
                  self.home / ".codex/skills/t3-boat/SKILL.md", self.home / ".codex/AGENTS.md"]

@@ -201,6 +201,11 @@ export PATH="$auth_tools:$PATH"
 printf '%s' "$ANSWERS" | t3-boat setup > "$HOME/setup-output"
 test ! -e "$HOME/check-vm"
 t3-boat status | grep -F 'Setup verified'
+active_profile=$(jq -r .profile "$HOME/profiles/selection.json")
+if jq -e '.playbook != null' "$HOME/profiles/$active_profile.json" >/dev/null; then
+  t3-boat roles > "$HOME/roles-output"
+  t3-boat roles models >> "$HOME/roles-output"
+fi
 SH
 }
 
@@ -225,14 +230,14 @@ for profile in codex-only claude-only codex+claude; do
     # The suggested playbook cannot be downloaded without a network: setup says so, changes nothing and asks
     # again; Enter then attaches none. Choose the lead model by number (the provider is the only one), then accept.
     codex-only) answers=$'agent-playbook\n\n2\n3\n\n\n\n' ;;
-    # Every choice is explicit: the role for the team lead and the model set, then the suggested lead model.
+    # A conventional lead role and the unique exact-provider model set are inherited, then accept the lead model.
     claude-only)
       if [[ $kind == bundled ]]; then
-        answers=$'bundled\nlead\nclaude-only\n\n\n\n'
+        answers=$'bundled\n\n\n\n'
       else
         (umask 077; t3_package)
         copy_package t3
-        answers=$'/data/teams/t3\nboat\nsolo\n\n\n\n'
+        answers=$'/data/teams/t3\nboat\n\n\n\n'
       fi ;;
     # A team that shares no role name, count or model set name with agent-playbook, copied in from the host
     # with the README's exact command into the directory every container start provides.
@@ -242,7 +247,7 @@ for profile in codex-only claude-only codex+claude; do
       echo " " >> "$host_dir/crew/team.json"
       copy_package crew
       docker exec "$container" cat /data/teams/crew/team.json | cmp - "$host_dir/crew/team.json"
-      answers=$'/data/teams/crew\nharbor-master\nduo\n\n\n\n' ;;
+      answers=$'/data/teams/crew\nharbor-master\n\n\n\n' ;;
   esac
   # Exercise real setup, worker scripts and status against offline service doubles.
   run_setup "$answers"
@@ -253,7 +258,7 @@ for profile in codex-only claude-only codex+claude; do
   docker exec "$container" jq -e 'keys == ["lead", "playbook"]' "$role_file" >/dev/null
   status=$(status_output "$container")
   setup_output=$(docker exec "$container" cat /data/setup-output)
-  # No role or model set is preselected by its name.
+  # An unresolved role prompt never gets a silent default.
   [[ $setup_output != *"follows ('none' for no role) ["* ]] || { echo "setup preselected a role" >&2; exit 1; }
   if [[ $kind == generic ]]; then
     [[ $setup_output != *"'bundled'"* ]] || { echo "the generic image offered a bundled playbook" >&2; exit 1; }
@@ -514,7 +519,7 @@ if [[ $kind == generic ]]; then
 else
   docker exec "$container" cp -R /opt/t3-boat/playbook "$release"
 fi
-run_setup $'agent-playbook\nlead\ncodex-only\n\n\n\n'
+run_setup $'agent-playbook\n\n\n\n'
 setup_output=$(docker exec "$container" cat /data/setup-output)
 require 't3-boat setup' "$setup_output" "Checking $release against the pinned commit $pinned_commit (offline)"
 require 't3-boat setup' "$setup_output" "Attaching agent-playbook (version 2.0.0, commit ${pinned_commit:0:12}) at $release"

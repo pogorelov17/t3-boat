@@ -56,7 +56,7 @@ class AuditTests(unittest.TestCase):
         playbook = readme[readme.index("### 2. Choose a playbook"):readme.index("### 3. Connect your accounts")]
         setup = readme[readme.index("### 3. Connect your accounts"):readme.index("### 4. Connect your devices")]
         self.assertIn("wait for the owner", playbook)
-        for choice in ("enter `agent-playbook`", "choose a lead role", "choose a model set"):
+        for choice in ("enter `agent-playbook`", "unresolved role", "unresolved role or model-set prompt"):
             self.assertIn(choice, playbook)
         self.assertIn("complete both sides", setup)
         self.assertIn("**T3:**", setup)
@@ -91,13 +91,12 @@ class AuditTests(unittest.TestCase):
     def test_only_the_generic_workflow_and_the_shared_skill_ship_as_instructions(self):
         self.assertEqual(sorted(p.name for p in (ROOT / "skills/t3-boat").iterdir()), ["SKILL.md", "generic.md"])
 
-    def test_no_role_or_model_set_name_is_special(self):
-        # No package role (such as agent-playbook's `lead`) or set name is a default; setup asks for each.
-        for path in SHIPPED:
-            with self.subTest(path=path.relative_to(ROOT)):
-                self.assertNotIn("OWNER_ROLE", path.read_text())
-                self.assertEqual(re.findall(r"""["'](?:lead|owner)["']\s*(?:\)|,|in\b)""",
-                                            path.read_text()) if path.suffix == ".py" else [], [])
+    def test_only_conventional_lead_and_an_unambiguous_provider_set_are_inherited(self):
+        setup = (ROOT / "bin/t3-boat").read_text()
+        self.assertIn('if "lead" in roles:', setup)
+        self.assertIn("if len(exact) == 1:", setup)
+        self.assertIn("when no such role exists", setup)
+        self.assertIn("when compatible model sets remain ambiguous", setup)
 
     def test_generic_instructions_set_no_branch_pull_request_or_merge_rule(self):
         # What a worker delivers, and how, comes from the brief or an attached package.

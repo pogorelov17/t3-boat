@@ -328,7 +328,17 @@ def worker_plan(role=None):
     if role not in package["roles"]:
         raise ValueError(f"{role!r} is not a role of the attached playbook {package['name']}. Its roles: "
                          + ", ".join(package["roles"]))
-    return lead, PROVIDERS[profile], f"the {package['name']} {role} role", package["roles"][role]
+    label = f"the {package['name']} {role} role"
+    assignment = package.get("assignments", {}).get(role)
+    if assignment:
+        entries = assignment.get("entries", [])
+        selectors = []
+        for entry in entries:
+            kind = "model" if "model" in entry else "family"
+            selectors.append(f"{entry['provider']} {kind}:{entry[kind]} {entry['effort']}")
+        shown = ", ".join(selectors) if selectors else "team lead chooses"
+        label += f" ({assignment.get('source', 'saved assignment')}: {shown})"
+    return lead, PROVIDERS[profile], label, package["roles"][role]
 
 
 def start(role=None):
