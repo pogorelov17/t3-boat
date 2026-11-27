@@ -22,7 +22,7 @@ flowchart TB
         direction LR
         L["Team lead<br/>writes an explicit brief"]:::lead
         P["Playbook · optional<br/>defines roles and sequence"]:::optional
-        L -.-|guides| P
+        P -. guides .-> L
     end
 
     subgraph VM["Disposable Boat VM"]
@@ -45,13 +45,13 @@ flowchart TB
     style VM fill:#f8fafc,stroke:#cbd5e1,stroke-dasharray:5 5,color:#64748b
 ```
 
-For each delegation, result or decision, the lead posts a short update with links instead of shell logs. For example, after you ask “Fix the failing date test and show me why it broke”:
+For each delegation, result or decision, the lead posts a short update with links instead of shell logs. For example, after you ask “Fix the failing date test, explain why it broke and open a pull request with the fix.”:
 
 > - **Who → whom:** lead → worker on `bx_7f3k` (child chat), Codex, lead model, high effort
 > - **Asked:** reproduce the failing `test_parse_iso_date`, fix it and open a pull request
 > - **Depends on:** `main` at `4e1c9a2`
 > - **Result:** the parser dropped the `Z` offset; fixed in `src/dates.py`; `pytest` 142 passed, 0 failed; pull request `#42` opened
-> - **Decision:** `#42` is ready for your review; VM `bx_7f3k` deleted
+> - **Decision:** `#42` is ready for your review.
 
 With a [playbook](#2-choose-a-playbook-optional) attached, its roles and their order decide who gets the next brief. The update takes the same form.
 
@@ -118,7 +118,7 @@ Setup asks, in this order:
 2. **Playbook:** press **Enter** for a generic worker, or enter your choice from [step 2](#2-choose-a-playbook-optional).
 3. **Lead model:** the model and reasoning level of your chats, which every worker also opens with. Press **Enter** to accept the one shown, or type `edit` to choose another.
 4. **GitHub repository URL:** enter a project URL, or press **Enter** to start with an idea in **Start here**.
-5. **Boat:** approve the device login if prompted, then select your worker environment.
+5. **Boat:** approve the device login if prompted, then select your worker environment. If prompted, confirm the repository attachment.
 
 Setup then checks the connections on a temporary VM, deletes it and finishes with **Setup verified**.
 
