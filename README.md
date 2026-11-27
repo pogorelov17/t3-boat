@@ -55,7 +55,9 @@ For each delegation, result or decision, the lead posts a short update with link
 
 With a [playbook](#2-choose-a-playbook-optional) attached, its roles and their order decide who gets the next brief. The update takes the same form.
 
-**What survives cleanup.** The lead copies each outcome into your chat before it deletes the worker's VM. Afterwards, the T3 history on your server and whatever the worker actually delivered elsewhere, such as a pushed branch or a pull request, remain. The worker's checkout, its chat and anything else left on the VM are gone. **Machine boundary:** your server runs only T3 and keeps an empty Git stub per project. The lead plans, decides and checks single facts on the web; every clone, edit, install, build and test runs on a Boat VM.
+**What survives cleanup.** The lead copies each outcome into your chat before it deletes the worker's VM. Afterwards, the T3 history on your server and whatever the worker actually delivered elsewhere, such as a pushed branch or a pull request, remain. The worker's checkout, its chat and anything else left on the VM are gone.
+
+Your server hosts T3 and handles worker provisioning and cleanup. The lead can plan and check a fact on the web. Workers clone the project, install its dependencies, edit its source and run builds and tests on Boat VMs.
 
 ## Quick start
 
@@ -91,7 +93,7 @@ Setup asks for a playbook right after sign-in, so decide before you run it. With
 At the **Playbook** prompt, enter one of these:
 
 - **Enter** for none: a generic worker. This is the default on a fresh install.
-- `agent-playbook` to download [agent-playbook](https://github.com/pogorelov17/agent-playbook) at the commit pinned in this release.
+- `agent-playbook` to download [agent-playbook](https://github.com/pogorelov17/agent-playbook) in the version selected for this T3 Boat release.
 - The path of a package inside the container, such as your own package under `/data/teams`.
 
 To use the current [agent-playbook main branch](https://github.com/pogorelov17/agent-playbook/tree/main) instead, run this before setup and enter `/data/teams/agent-playbook-main` at the prompt:
@@ -100,7 +102,7 @@ To use the current [agent-playbook main branch](https://github.com/pogorelov17/a
 docker exec t3-boat git clone --depth 1 --branch main https://github.com/pogorelov17/agent-playbook /data/teams/agent-playbook-main
 ```
 
-When you attach a package, setup also asks which of its roles the lead follows and which of its model sets applies.
+When you attach a package, setup also asks which of its roles the lead follows and, if a compatible model set is available, which one to use.
 
 ### 3. Connect your accounts and verify a worker
 
@@ -120,7 +122,7 @@ Setup asks, in this order:
 
 Setup then checks the connections on a temporary VM, deletes it and finishes with **Setup verified**.
 
-**Change it later.** Run the same setup command again to change the lead model (type `edit`), attach another playbook or detach it with `none`, or add a repository by entering its URL. Press **Enter** to keep any other saved answer. To check the installation without starting a VM, run `docker exec t3-boat t3-boat status`.
+**Change it later.** Run the same setup command again to change the lead model (type `edit`), attach another playbook or detach it with `none`, or add a repository by entering its URL. Where setup shows a saved default, press **Enter** to keep it. To check the installation without starting a VM, run `docker exec t3-boat t3-boat status`.
 
 ### 4. Open your first chat
 
@@ -138,7 +140,9 @@ docker exec -it t3-boat t3 auth pairing create --ttl 5m --base-url http://127.0.
 
 In the desktop app, open **Settings → Environments → Add environment → Remote link** and paste the URL, or open it in a browser to pair that browser. Issue a fresh link for each client.
 
-Select your repository, or **Start here** if you skipped the URL, open a new chat and describe your task in your own words. For example:
+If you skipped the repository URL, open **Start here** to plan your idea. When you are ready to delegate project work, rerun setup with the repository URL.
+
+Open a chat in your repository and describe the task. For example:
 
 > Fix the failing date test, explain why it broke and open a pull request with the fix.
 
