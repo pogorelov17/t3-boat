@@ -107,7 +107,8 @@ restart() {
 }
 extra=()  # More `docker run` options, such as bind mounts.
 start() {
-  container=$(docker run -d --network none -v "$volume:/data" "${extra[@]}" "$image")
+  # `${array[@]}` is an unbound variable for an empty declared array under macOS Bash 3.2 with `set -u`.
+  container=$(docker run -d --network none -v "$volume:/data" ${extra[@]+"${extra[@]}"} "$image")
   for _ in {1..60}; do
     if docker exec "$container" curl -fsS --max-time 2 http://127.0.0.1:3773/ -o /dev/null 2>/dev/null; then
       return
@@ -272,8 +273,11 @@ for profile in codex-only claude-only codex+claude; do
       [[ $(docker exec "$container" ls /data/.codex/skills) == t3-boat ]]
       # Generic instructions set no delivery form of their own.
       generic_text=$(docker exec "$container" cat "$skill" /data/.codex/AGENTS.md)
-      [[ ! ${generic_text,,} =~ draft|pull\ request|task\ branch ]] ||
-        { echo "generic instructions name a branch or pull request rule: ${BASH_REMATCH[0]}" >&2; exit 1; }
+      if match=$(printf '%s' "$generic_text" | tr '[:upper:]' '[:lower:]' |
+          grep -Eom 1 'draft|pull request|task branch'); then
+        echo "generic instructions name a branch or pull request rule: $match" >&2
+        exit 1
+      fi
       require 't3-boat status' "$status" 'Playbook: none'
       require 't3-boat setup' "$setup_output" "Suggested: agent-playbook, https://github.com/pogorelov17/agent-playbook at commit a27b16a7d696."
       require 't3-boat setup' "$setup_output" "Enter for none, 'agent-playbook' for the suggested playbook"
@@ -350,7 +354,8 @@ SH
           and .lead == {"provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}' "$role_file" >/dev/null
         # The package's `boat` role cannot replace the Boat skill; qa_bot and QA-bot keep separate guides.
         docker exec "$container" grep -Fq '# Boat project workflow' "$skill"
-        guides=$(docker exec "$container" sh -c 'ls -d /data/.claude/skills/playbook-t3-*' | wc -l)
+        guides=$(docker exec "$container" sh -c 'ls -d /data/.claude/skills/playbook-t3-*' |
+          wc -l | tr -d '[:space:]')
         [[ $guides == 3 ]] || { echo "expected 3 guides for package t3, found $guides" >&2; exit 1; }
         docker exec "$container" sh -c 'grep -lq INSTRUCTIONS-FOR-QA-bot /data/.claude/skills/playbook-t3-qa-bot-*/SKILL.md'
         docker exec "$container" sh -c 'grep -lq INSTRUCTIONS-FOR-qa_bot /data/.claude/skills/playbook-t3-qa-bot-*/SKILL.md'
