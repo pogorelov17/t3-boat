@@ -107,7 +107,8 @@ restart() {
 }
 extra=()  # More `docker run` options, such as bind mounts.
 start() {
-  container=$(docker run -d --network none -v "$volume:/data" "${extra[@]}" "$image")
+  # `${array[@]}` is an unbound variable for an empty declared array under macOS Bash 3.2 with `set -u`.
+  container=$(docker run -d --network none -v "$volume:/data" ${extra[@]+"${extra[@]}"} "$image")
   for _ in {1..60}; do
     if docker exec "$container" curl -fsS --max-time 2 http://127.0.0.1:3773/ -o /dev/null 2>/dev/null; then
       return
@@ -201,6 +202,11 @@ export PATH="$auth_tools:$PATH"
 printf '%s' "$ANSWERS" | t3-boat setup > "$HOME/setup-output"
 test ! -e "$HOME/check-vm"
 t3-boat status | grep -F 'Setup verified'
+active_profile=$(jq -r .profile "$HOME/profiles/selection.json")
+if jq -e '.playbook != null' "$HOME/profiles/$active_profile.json" >/dev/null; then
+  t3-boat roles > "$HOME/roles-output"
+  t3-boat roles models >> "$HOME/roles-output"
+fi
 SH
 }
 
@@ -225,14 +231,14 @@ for profile in codex-only claude-only codex+claude; do
     # The suggested playbook cannot be downloaded without a network: setup says so, changes nothing and asks
     # again; Enter then attaches none. Choose the lead model by number (the provider is the only one), then accept.
     codex-only) answers=$'agent-playbook\n\n2\n3\n\n\n\n' ;;
-    # Every choice is explicit: the role for the team lead and the model set, then the suggested lead model.
+    # A conventional lead role and the unique exact-provider model set are inherited, then accept the lead model.
     claude-only)
       if [[ $kind == bundled ]]; then
-        answers=$'bundled\nlead\nclaude-only\n\n\n\n'
+        answers=$'bundled\n\n\n\n'
       else
         (umask 077; t3_package)
         copy_package t3
-        answers=$'/data/teams/t3\nboat\nsolo\n\n\n\n'
+        answers=$'/data/teams/t3\nboat\n\n\n\n'
       fi ;;
     # A team that shares no role name, count or model set name with agent-playbook, copied in from the host
     # with the README's exact command into the directory every container start provides.
@@ -242,7 +248,7 @@ for profile in codex-only claude-only codex+claude; do
       echo " " >> "$host_dir/crew/team.json"
       copy_package crew
       docker exec "$container" cat /data/teams/crew/team.json | cmp - "$host_dir/crew/team.json"
-      answers=$'/data/teams/crew\nharbor-master\nduo\n\n\n\n' ;;
+      answers=$'/data/teams/crew\nharbor-master\n\n\n\n' ;;
   esac
   # Exercise real setup, worker scripts and status against offline service doubles.
   run_setup "$answers"
@@ -253,7 +259,7 @@ for profile in codex-only claude-only codex+claude; do
   docker exec "$container" jq -e 'keys == ["lead", "playbook"]' "$role_file" >/dev/null
   status=$(status_output "$container")
   setup_output=$(docker exec "$container" cat /data/setup-output)
-  # No role or model set is preselected by its name.
+  # An unresolved role prompt never gets a silent default.
   [[ $setup_output != *"follows ('none' for no role) ["* ]] || { echo "setup preselected a role" >&2; exit 1; }
   if [[ $kind == generic ]]; then
     [[ $setup_output != *"'bundled'"* ]] || { echo "the generic image offered a bundled playbook" >&2; exit 1; }
@@ -267,8 +273,11 @@ for profile in codex-only claude-only codex+claude; do
       [[ $(docker exec "$container" ls /data/.codex/skills) == t3-boat ]]
       # Generic instructions set no delivery form of their own.
       generic_text=$(docker exec "$container" cat "$skill" /data/.codex/AGENTS.md)
-      [[ ! ${generic_text,,} =~ draft|pull\ request|task\ branch ]] ||
-        { echo "generic instructions name a branch or pull request rule: ${BASH_REMATCH[0]}" >&2; exit 1; }
+      if match=$(printf '%s' "$generic_text" | tr '[:upper:]' '[:lower:]' |
+          grep -Eom 1 'draft|pull request|task branch'); then
+        echo "generic instructions name a branch or pull request rule: $match" >&2
+        exit 1
+      fi
       require 't3-boat status' "$status" 'Playbook: none'
       require 't3-boat setup' "$setup_output" "Suggested: agent-playbook, https://github.com/pogorelov17/agent-playbook at commit a27b16a7d696."
       require 't3-boat setup' "$setup_output" "Enter for none, 'agent-playbook' for the suggested playbook"
@@ -345,7 +354,8 @@ SH
           and .lead == {"provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}' "$role_file" >/dev/null
         # The package's `boat` role cannot replace the Boat skill; qa_bot and QA-bot keep separate guides.
         docker exec "$container" grep -Fq '# Boat project workflow' "$skill"
-        guides=$(docker exec "$container" sh -c 'ls -d /data/.claude/skills/playbook-t3-*' | wc -l)
+        guides=$(docker exec "$container" sh -c 'ls -d /data/.claude/skills/playbook-t3-*' |
+          wc -l | tr -d '[:space:]')
         [[ $guides == 3 ]] || { echo "expected 3 guides for package t3, found $guides" >&2; exit 1; }
         docker exec "$container" sh -c 'grep -lq INSTRUCTIONS-FOR-QA-bot /data/.claude/skills/playbook-t3-qa-bot-*/SKILL.md'
         docker exec "$container" sh -c 'grep -lq INSTRUCTIONS-FOR-qa_bot /data/.claude/skills/playbook-t3-qa-bot-*/SKILL.md'
@@ -514,7 +524,7 @@ if [[ $kind == generic ]]; then
 else
   docker exec "$container" cp -R /opt/t3-boat/playbook "$release"
 fi
-run_setup $'agent-playbook\nlead\ncodex-only\n\n\n\n'
+run_setup $'agent-playbook\n\n\n\n'
 setup_output=$(docker exec "$container" cat /data/setup-output)
 require 't3-boat setup' "$setup_output" "Checking $release against the pinned commit $pinned_commit (offline)"
 require 't3-boat setup' "$setup_output" "Attaching agent-playbook (version 2.0.0, commit ${pinned_commit:0:12}) at $release"

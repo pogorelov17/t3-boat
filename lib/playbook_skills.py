@@ -11,6 +11,7 @@ import stat
 from pathlib import Path
 
 from playbook import read_regular, skill_name
+import role_models
 
 MARK = "<!-- t3-boat: generated from an attached playbook"
 
@@ -140,7 +141,7 @@ def _cell(value):
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
-def section(base, package, model_set, lead_role, installed):
+def section(base, package, model_set, lead_role, installed, overrides=None):
     """The skill section that describes the attached package to the lead: data only, quoted from the package."""
     lines = [
         "## Attached playbook", "",
@@ -159,26 +160,41 @@ def section(base, package, model_set, lead_role, installed):
     for role, spec in package.roles.items():
         path = skill_path(base, package, role)
         lines.append(f"| {role} | {spec['instances']} | {path if path in installed else 'not installed'} |")
-    if model_set is None:
+    overrides = overrides or {}
+    assignments = role_models.effective(package, model_set, overrides)
+    if model_set is None and not overrides:
         lines += ["", "No model set of the package is selected for this profile, so the package assigns no models "
                       "here. Choose each worker's model yourself and name it in the parent update."]
     else:
-        data = package.model_set(model_set)
-        lines += ["", f"### Model assignment: `{model_set}`", "",
-                  f"Selected in setup from {data['path']}. Resolve each family to an exact model that "
+        data = package.model_set(model_set) if model_set else {"exceptions": [], "path": None}
+        title = f"### Model assignment: `{model_set}`" if model_set else "### Model assignment overrides"
+        origin = f"Selected in setup from {data['path']}. " if model_set else ""
+        lines += ["", title, "",
+                  origin + "Persistent owner overrides take precedence. Resolve each family to an exact model that "
                   "`orchestrator_capabilities` lists before you delegate; if none fits, tell the owner before "
                   "starting the worker.", "",
-                  "| Role | Instance | T3 provider | Family | Effort |", "| --- | --- | --- | --- | --- |"]
-        for role, entries in data["roles"].items():
+                  "| Role | Instance | T3 provider | Model or family | Effort | Source |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for role, assignment in assignments.items():
+            entries = assignment["entries"]
+            if not entries:
+                lines.append(f"| {_cell(role)} | - | - | team lead chooses | - | {assignment['source']} |")
             for number, entry in enumerate(entries, start=1):
-                lines.append(f"| {_cell(role)} | {number} | {entry['provider']} | {_cell(entry['family'])} | "
-                             f"{_cell(entry['effort'])} |")
+                kind = "model" if "model" in entry else "family"
+                shown = "model:" + _cell(entry[kind]) if kind == "model" else _cell(entry[kind])
+                lines.append(f"| {_cell(role)} | {number} | {entry['provider']} | "
+                             f"{shown} | {_cell(entry['effort'])} | "
+                             f"{assignment['source']} |")
         if data["exceptions"]:
             lines += ["", "Exceptions declared by this model set, as written in it:", "", "```json",
                       json.dumps(data["exceptions"], indent=2), "```"]
     if package.model_rules:
         lines += ["", "Model rules declared by the package's `team.json`, as written in it:", "", "```json",
                   json.dumps(package.model_rules, indent=2), "```"]
+    lines += ["", "An explicit owner request may choose another listed model for one delegation without saving it. "
+              "For a persistent change to future tasks, first show `t3-boat roles`, show the proposed diff, and "
+              "only on explicit owner approval run `t3-boat roles set ROLE ...`. Never persist a model change on "
+              "your own initiative."]
     return "\n".join(lines) + "\n"
 
 

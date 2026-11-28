@@ -51,10 +51,10 @@ flowchart TB
 
 **Installing with an AI agent?** A request to install T3 Boat authorizes infrastructure work, not setup decisions. On a fresh volume, the first `t3-boat setup` prints `OWNER_INPUT_REQUIRED` and exits without reading answers. The agent must show that block to the owner, stop its turn and wait. It must not rerun setup with `--owner-approved` until the owner replies.
 
-The agent must obtain explicit choices of provider profile, playbook, project and whether it may accept setup's recommended lead model. It must not infer them from the installing agent, this repository URL or an omitted answer. If a playbook is selected, it must later show its lead roles and model sets and wait again. It must never press **Enter**, choose `none`, defer the project or select a model on the owner's behalf.
+The agent must obtain explicit choices of provider profile, playbook, project and whether it may accept setup's recommended lead model. It must not infer them from the installing agent, this repository URL or an omitted answer. If a playbook is selected, setup inherits a role literally named `lead` and the one model set whose providers exactly match the chosen provider profile. The agent must show and wait only for choices that remain unresolved. It must never press **Enter**, choose `none`, defer the project or select a model on the owner's behalf.
 
 - **Provider profile:** setup asks separately whether to connect Codex with ChatGPT and Claude Code with Claude. Codex only uses `codex-only`; Claude only uses `claude-only`; both use `codex+claude`; neither stops the installation without changing the saved choice.
-- **Playbook:** choose no playbook, the suggested `agent-playbook`, or a custom package path. The agent must not download or attach one until you choose it. If you attach one, the agent must also show you its available lead roles and model sets and wait for those choices.
+- **Playbook:** choose no playbook, the suggested `agent-playbook`, or a custom package path. The agent must not download or attach one until you choose it. If setup cannot inherit a unique lead role or provider-matching model set, the agent must show the remaining choices and wait.
 - **Project:** provide the GitHub repository you want workers to use, or explicitly defer it and start with an idea. The T3 Boat repository named in an install request is only the installation source unless you explicitly select it as your project.
 
 You need a Linux server with curl and [Docker Engine](https://docs.docker.com/engine/install/) (AMD64 or ARM64), a Boat account that can start a small VM, a GitHub account and the subscriptions for your profile. A repository is optional.
@@ -85,7 +85,7 @@ Use a fresh data volume for a clean install. If another container uses `t3-boat-
 
 Setup asks for a playbook right after sign-in, so decide before you run it. Without one, the lead briefs a generic worker for each task and decides how many to start and in what order. A playbook is an external package, a `team.json` manifest with role guides, that defines the roles, their instructions, their sequence and optionally their models. T3 Boat reads it as data and only launches its workers. It applies to every project of this profile and adds nothing to your repositories.
 
-An AI installer must stop before the **Playbook** prompt, present the choices below and wait for the owner. It must not press **Enter**, enter `agent-playbook`, choose a lead role or choose a model set on the owner's behalf. It may recommend a choice and explain it.
+An AI installer must stop before the **Playbook** prompt, present the choices below and wait for the owner. It must not press **Enter**, enter `agent-playbook` or answer any unresolved role or model-set prompt on the owner's behalf. It may recommend a choice and explain it.
 
 At the **Playbook** prompt, enter one of these:
 
@@ -99,7 +99,7 @@ To use the current [agent-playbook main branch](https://github.com/pogorelov17/a
 docker exec t3-boat git clone --depth 1 --branch main https://github.com/pogorelov17/agent-playbook /data/teams/agent-playbook-main
 ```
 
-When you attach a package, setup also asks which of its roles the lead follows and, if a compatible model set is available, which one to use.
+When you attach a package, setup uses its `lead` role automatically when present. It also uses the single compatible model set whose providers exactly match the selected provider profile. Setup asks only when either choice is still ambiguous; selecting Codex plus Claude once therefore also selects a unique Codex-plus-Claude playbook set.
 
 ### 3. Connect your accounts and verify a worker
 
@@ -126,16 +126,34 @@ Setup asks, in this order:
 
 1. **Provider subscriptions:** answer `yes` or `no` separately for Codex with ChatGPT and Claude Code with Claude. A fresh setup accepts no default and stops if both answers are `no`.
 2. **Sign in** to each selected provider. Valid sessions are reused.
-3. **Playbook:** press **Enter** for a generic worker, or enter your explicit choice from [step 2](#2-choose-a-playbook-optional). For an attached playbook, explicitly choose its lead role and model set when offered.
+3. **Playbook:** press **Enter** for a generic worker, or enter your explicit choice from [step 2](#2-choose-a-playbook-optional). Setup reports an inherited `lead` role and exact provider-matching model set; explicitly choose only an unresolved role or model set when offered.
 4. **Lead model:** the model and reasoning level of your chats, which every worker also opens with. Press **Enter** to accept the one shown, or type `edit` to choose another.
 5. **GitHub repository URL:** enter the project URL you chose, or press **Enter** only if you explicitly chose to defer it and start with an idea in **Start here**.
 6. **Boat:** approve the device login if prompted, select the worker environment you prepared and confirm the repository attachment if prompted.
 
 Setup then checks the connections on a temporary VM, deletes it and finishes with **Setup verified**. For an attached repository, the check must authenticate to GitHub from that VM and read the repository's refs; access only on the T3 server is not enough.
 
-An AI installer must not answer the playbook, lead role, model set, lead model or repository prompts for the owner. It must pause at each undecided choice. After setup, it must run `docker exec t3-boat t3-boat status` and report the exact profile; playbook name, version and commit or `none`; lead role and model set when present; lead model; repository URL or an explicit defer; Boat environment and credential profile; providers and models that replied; the temporary VM ID and confirmed deletion; and whether that VM read the selected repository's refs. It must not report repository setup as complete while status says access is deferred.
+An AI installer must not answer the playbook, unresolved lead role, unresolved model set, lead model or repository prompts for the owner. It must pause at each undecided choice and must not ask again for a choice setup reports as inherited. After setup, it must run `docker exec t3-boat t3-boat status` and report the exact profile; playbook name, version and commit or `none`; lead role and model set when present; lead model; repository URL or an explicit defer; Boat environment and credential profile; providers and models that replied; the temporary VM ID and confirmed deletion; and whether that VM read the selected repository's refs. It must not report repository setup as complete while status says access is deferred.
 
 **Change it later.** Run the same setup command again. Keep the saved provider profile or explicitly choose to change its subscriptions, change the lead model (type `edit`), attach another playbook or detach it with `none`, or add a repository by entering its URL. Where setup shows a saved default, press **Enter** to keep it. To check the installation without starting a VM, run `docker exec t3-boat t3-boat status`.
+
+**Change role models without rebuilding.** With a playbook attached, inspect the effective assignment and its source, then inspect the models currently selectable by T3:
+
+```sh
+docker exec t3-boat t3-boat roles
+docker exec t3-boat t3-boat roles models
+```
+
+An explicit owner request may use another available model for one delegation without saving it. To persist a change for future workers, name either a model family or an exact model:
+
+```sh
+docker exec t3-boat t3-boat roles set ROLE --provider PROVIDER --family FAMILY --effort EFFORT
+docker exec t3-boat t3-boat roles set ROLE --provider PROVIDER --model MODEL --effort EFFORT
+docker exec t3-boat t3-boat roles reset ROLE
+docker exec t3-boat t3-boat roles reset --all
+```
+
+`set` validates the enabled subscription, the live model catalog and the playbook's model constraints, then atomically updates the profile, generated lead skill and applied worker record. It affects future delegations; already-running workers keep their launch model. No image rebuild or container restart is needed. The lead model itself remains a setup choice.
 
 ### 4. Connect your devices and open your first chat
 

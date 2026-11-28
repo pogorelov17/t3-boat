@@ -19,8 +19,10 @@ import boat_profile
 import playbook
 import playbook_fetch
 import playbook_pin
+import role_models
 from boat_profile import PARENT, read_profile, read_selection, read_state, select_profile, write
-from model_picker import configure
+from model_catalog import catalog
+from model_picker import configure, resolve
 
 # The provider subscriptions of each profile, with the names used for sign-in and Boat subscriptions.
 PROFILES = {name: tuple("claude" if p == "claudeAgent" else p for p in providers)
@@ -37,6 +39,10 @@ class SetupError(Exception):
 
 class ProfileError(SetupError):
     """A saved profile the user must repair; the message names the file."""
+
+
+class RoleError(Exception):
+    """A roles command the owner can correct without rerunning setup."""
 
 
 def probe(*argv):
@@ -212,8 +218,10 @@ def describe(attachment):
         package = playbook.load(attachment["path"])
     except playbook.PlaybookError as error:
         return f"cannot be read: {error}"
+    overrides = attachment.get("role_overrides", {})
     return (package.label() + (f", model set {attachment['model_set']}" if attachment["model_set"] else ", no model set")
-            + (f", team lead follows {attachment['lead_role']}" if attachment["lead_role"] else ", no role for the team lead"))
+            + (f", team lead follows {attachment['lead_role']}" if attachment["lead_role"] else ", no role for the team lead")
+            + (f", {len(overrides)} owner model override(s)" if overrides else ""))
 
 
 def menu_choice(reply, names):
@@ -247,7 +255,8 @@ Ask the owner and wait for one reply covering:
 2. Playbook: none, the suggested agent-playbook, or a custom package path.
 3. Project: an explicit GitHub repository URL, or explicitly defer it and start with an idea.
 4. Lead model: permission to accept setup's recommendation, or a request to show the available choices first.
-If a playbook is selected, later show its lead roles and model sets and wait again; never choose them yourself.
+If a playbook leaves its team-lead role or model set ambiguous, later show only those unresolved choices and wait.
+Do not ask again when T3 Boat reports that a role or model set was inherited automatically.
 
 Only after the owner replies, rerun:
   docker exec -it t3-boat t3-boat setup --owner-approved""")
@@ -269,9 +278,11 @@ def choose_provider_profile(current=None):
 
 
 def choose_lead_role(package, current):
-    """Ask which of the package's roles the T3 team lead follows, if any. Only an earlier choice is a default:
-    no role name means anything to T3 Boat."""
+    """Use a package's conventional `lead` role; ask only when no such role exists."""
     roles = list(package.roles)
+    if "lead" in roles:
+        print(f"Team lead role: lead (inherited from {package.name}; every other role is a worker).")
+        return "lead"
     default = current if current in roles else None
     print(f"Roles of {package.name}: " + ", ".join(f"{n}. {role}" for n, role in enumerate(roles, start=1)))
     while True:
@@ -288,12 +299,16 @@ def choose_lead_role(package, current):
 
 
 def choose_model_set(profile, package, current):
-    """Ask which of the package's model sets assigns this profile's models, or None ('none', or none fits).
-    Only an earlier choice is a default: no set name means anything to T3 Boat."""
+    """Inherit the one exact provider match; ask only when compatible model sets remain ambiguous."""
     if not package.model_set_paths:
         print(f"{package.name} declares no model sets; the team lead chooses each worker's model.")
         return None
     fitting = package.fitting_sets(boat_profile.PROVIDERS[profile])
+    enabled = set(boat_profile.PROVIDERS[profile])
+    exact = [name for name in fitting if set(package.set_providers(name)) == enabled]
+    if len(exact) == 1:
+        print(f"Model set: {exact[0]} (inherited from provider profile {profile}).")
+        return exact[0]
     other = [name for name in package.model_set_paths if name not in fitting]
     if other:
         print(f"Model sets that need a provider {profile} does not enable: {', '.join(other)}.")
@@ -396,7 +411,10 @@ def choose_playbook(profile, current):
         same = current is not None and Path(current["path"]) == package.root
         lead_role = choose_lead_role(package, current["lead_role"] if same else None)
         model_set = choose_model_set(profile, package, current["model_set"] if same else None)
-        return {"path": str(package.root), "model_set": model_set, "lead_role": lead_role}, package
+        attachment = {"path": str(package.root), "model_set": model_set, "lead_role": lead_role}
+        if same and current.get("role_overrides"):
+            attachment["role_overrides"] = dict(current["role_overrides"])
+        return attachment, package
 
 
 def setup(profile=None, providers=None, restart_after_selection=False):
@@ -565,14 +583,172 @@ def unconfigured_status():
     return 1
 
 
+def role_context(profile):
+    """The applied playbook configuration used by role inspection and mutation commands."""
+    state = read_state(profile, missing=None)
+    if state is None:
+        raise RoleError("complete t3-boat setup before managing role models")
+    attachment = state.get("playbook")
+    if attachment is None:
+        raise RoleError("attach a playbook with t3-boat setup before managing role models")
+    try:
+        package, model_set, lead_role = boat_profile.check_attachment(profile, attachment)
+    except (boat_profile.ProfileError, playbook.PlaybookError) as error:
+        raise RoleError(str(error)) from None
+    return state, attachment, package, model_set, lead_role
+
+
+def show_roles(profile):
+    state, attachment, package, model_set, lead_role = role_context(profile)
+    assignments = role_models.effective(package, model_set, attachment.get("role_overrides", {}))
+    print(f"Profile: {profile}")
+    print(f"Playbook: {package.label(where=False)}")
+    print("Role\tInstance\tProvider\tModel selector\tEffort\tSource")
+    lead = state[PARENT]
+    print(f"{lead_role or 'T3 team lead'}\t-\t{lead['provider']}\tmodel:{lead['model']}\t"
+          f"{lead['effort']}\tprofile lead model")
+    for role, assignment in assignments.items():
+        if role == lead_role:
+            continue
+        if not assignment["entries"]:
+            print(f"{role}\t-\t-\tteam lead chooses\t-\t{assignment['source']}")
+        for number, row in enumerate(assignment["entries"], start=1):
+            kind = "model" if "model" in row else "family"
+            print(f"{role}\t{number}\t{row['provider']}\t{kind}:{row[kind]}\t{row['effort']}\t"
+                  f"{assignment['source']}")
+    return 0
+
+
+def show_models(profile, provider=None):
+    available = live_catalog(profile)
+    selected = {"claude": "claudeAgent", "claudeAgent": "claudeAgent", "codex": "codex"}.get(provider, provider)
+    if selected and selected not in boat_profile.PROVIDERS[profile]:
+        raise RoleError(f"provider must be one of {', '.join(boat_profile.PROVIDERS[profile])} for {profile}")
+    for name, models in available.items():
+        if selected and name != selected:
+            continue
+        print(name + ":")
+        for model, efforts in models.items():
+            print(f"  {model}: {', '.join(efforts)}")
+    return 0
+
+
+def resolved_assignment(row, available):
+    """Resolve or validate one override/base assignment against the live local catalog."""
+    provider = row["provider"]
+    if "model" in row:
+        return dict(row) if row["effort"] in available.get(provider, {}).get(row["model"], []) else None
+    return resolve(row, available)
+
+
+def live_catalog(profile):
+    """Load the live provider catalog and keep a catalog problem inside the roles command's error contract."""
+    try:
+        return catalog(profile)
+    except ValueError as error:
+        raise RoleError(str(error)) from None
+
+
+def set_role(profile, role, provider, family, model, effort):
+    if not role or not provider or not effort or bool(family) == bool(model):
+        raise RoleError("usage: t3-boat roles set ROLE --provider PROVIDER (--family FAMILY | --model MODEL) "
+                        "--effort EFFORT")
+    provider = {"claude": "claudeAgent", "claudeAgent": "claudeAgent", "codex": "codex"}.get(provider, provider)
+    state, attachment, package, model_set, lead_role = role_context(profile)
+    row = {"provider": provider, "effort": effort, ("family" if family else "model"): family or model}
+    overrides = dict(attachment.get("role_overrides", {}))
+    overrides[role] = row
+    try:
+        role_models.check_overrides(package, overrides, boat_profile.PROVIDERS[profile], lead_role)
+    except ValueError as error:
+        raise RoleError(str(error)) from None
+    available = live_catalog(profile)
+    exact = resolved_assignment(row, available)
+    if exact is None:
+        raise RoleError(f"{role_models.selector(row)} does not resolve to a currently selectable model and effort")
+    assignments = role_models.effective(package, model_set, overrides)
+    violations = role_models.rule_violations(package, assignments,
+                                             resolver=lambda entry: resolved_assignment(entry, available))
+    if violations:
+        raise RoleError("override violates the playbook model rules: " + "; ".join(violations))
+    previous = role_models.effective(package, model_set, attachment.get("role_overrides", {}))[role]
+    before = ", ".join(role_models.selector(entry) for entry in previous["entries"]) or "team lead chooses"
+    updated = json.loads(json.dumps(state))
+    updated["playbook"] = dict(attachment, role_overrides=overrides)
+    boat_profile.prepare(profile, updated, loaded=(package, model_set, lead_role))
+    print(f"{role}: {before} -> {role_models.selector(row)} (owner override)")
+    print("Currently resolves to " + role_models.selector(exact) + ".")
+    print("Applied to future workers. Running workers were not changed; no image rebuild or container restart was needed.")
+    return 0
+
+
+def reset_roles(profile, role=None, all_roles=False):
+    if bool(role) == bool(all_roles):
+        raise RoleError("usage: t3-boat roles reset ROLE | t3-boat roles reset --all")
+    state, attachment, package, model_set, lead_role = role_context(profile)
+    overrides = dict(attachment.get("role_overrides", {}))
+    if all_roles:
+        changed = sorted(overrides)
+        overrides.clear()
+    else:
+        if role not in package.roles:
+            raise RoleError(f"{role!r} is not a role of {package.name}")
+        if role == lead_role:
+            raise RoleError(f"the {role!r} role is the T3 team lead; change its model with t3-boat setup")
+        changed = [role] if role in overrides else []
+        overrides.pop(role, None)
+    updated = json.loads(json.dumps(state))
+    new_attachment = dict(attachment)
+    if overrides:
+        new_attachment["role_overrides"] = overrides
+    else:
+        new_attachment.pop("role_overrides", None)
+    updated["playbook"] = new_attachment
+    boat_profile.prepare(profile, updated, loaded=(package, model_set, lead_role))
+    print("Reset owner overrides: " + (", ".join(changed) if changed else "none were set"))
+    print("Future workers inherit the selected model set; running workers were not changed.")
+    return 0
+
+
+def roles_command(profile, args):
+    action = args.roles_action or "show"
+    if action == "show":
+        if any((args.role, args.provider, args.family, args.model, args.effort, args.all_roles)):
+            raise RoleError("usage: t3-boat roles [show]")
+        return show_roles(profile)
+    if action == "models":
+        if any((args.role, args.family, args.model, args.effort, args.all_roles)):
+            raise RoleError("usage: t3-boat roles models [--provider PROVIDER]")
+        return show_models(profile, args.provider)
+    if action == "set":
+        if args.all_roles:
+            raise RoleError("--all is only valid with roles reset")
+        return set_role(profile, args.role, args.provider, args.family, args.model, args.effort)
+    if action == "reset":
+        if any((args.provider, args.family, args.model, args.effort)):
+            raise RoleError("usage: t3-boat roles reset ROLE | t3-boat roles reset --all")
+        return reset_roles(profile, args.role, args.all_roles)
+    raise RoleError("roles action must be one of: show, models, set, reset")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("serve", "setup", "status"))
+    parser.add_argument("command", choices=("serve", "setup", "status", "roles"))
+    parser.add_argument("roles_action", nargs="?", choices=("show", "models", "set", "reset"))
+    parser.add_argument("role", nargs="?")
     parser.add_argument("--owner-approved", action="store_true",
                         help="continue a fresh setup only after the installer showed the choices and the owner replied")
+    parser.add_argument("--provider")
+    parser.add_argument("--family")
+    parser.add_argument("--model")
+    parser.add_argument("--effort")
+    parser.add_argument("--all", dest="all_roles", action="store_true")
     args = parser.parse_args()
     if args.owner_approved and args.command != "setup":
         parser.error("--owner-approved is only valid with setup")
+    role_options = (args.roles_action, args.role, args.provider, args.family, args.model, args.effort, args.all_roles)
+    if args.command != "roles" and any(role_options):
+        parser.error("role actions and options are only valid with roles")
     profile = read_selection(missing=None)
     if args.command == "serve":
         command = [sys.executable, str(Path(__file__).resolve().parents[1] / "lib/boat_profile.py")]
@@ -600,6 +776,14 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX)
             setup(restart_after_selection=True)
         profile = read_selection()
+    if args.command == "roles":
+        if profile is None:
+            raise RoleError("select provider subscriptions with t3-boat setup first")
+        if args.roles_action in ("set", "reset"):
+            with (Path.home() / ".boat-setup.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                return roles_command(profile, args)
+        return roles_command(profile, args)
     if profile is None:
         return unconfigured_status()
     return status(profile, PROFILES[profile])
@@ -609,6 +793,8 @@ if __name__ == "__main__":
     os.umask(0o077)
     try:
         sys.exit(main())
+    except RoleError as error:
+        sys.exit(f"T3 Boat roles: {error}")
     except (ProfileError, boat_profile.ProfileError) as error:
         # The message names the file to repair; rerunning setup first would fail the same way.
         sys.exit(f"T3 Boat profile: {error}")

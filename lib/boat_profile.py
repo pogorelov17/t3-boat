@@ -4,12 +4,14 @@
 A profile file, `profiles/PROFILE.json`, holds everything setup chose for that provider profile:
 
     {"lead": {"provider": ..., "model": ..., "effort": ...},
-     "playbook": null | {"path": "/absolute/package/dir", "model_set": null | "NAME", "lead_role": null | "ROLE"}}
+     "playbook": null | {"path": "/absolute/package/dir", "model_set": null | "NAME", "lead_role": null | "ROLE",
+                          "role_overrides": {"ROLE": {"provider": ..., "family" | "model": ..., "effort": ...}}}}
 
 `lead` is the model of the T3 chats (the team lead) and the model every Boat worker opens with. `playbook` is
 the optional external package attached in setup: its directory, the model set chosen for this profile, and the
-package role whose guide the T3 team lead follows. Setup writes the file in one atomic step, and every generated
-file (T3 settings, instructions, skills) is derived from it, so a container start can always regenerate them.
+package role whose guide the T3 team lead follows, plus optional owner-approved model overrides for future role
+workers. Setup writes the file in one atomic step, and every generated file (T3 settings, instructions, skills) is
+derived from it, so a container start can always regenerate them.
 
 The package is read once per run, in full, and everything is generated from that one read. The last file written,
 `profiles/PROFILE.applied.json`, records the saved choice it was generated from and each role's worker guide, so
@@ -29,6 +31,7 @@ from tempfile import NamedTemporaryFile
 
 import playbook
 import playbook_skills
+import role_models
 
 ROOT = Path(__file__).resolve().parents[1]
 # The provider subscriptions of each profile, as T3 provider instances. These are T3 Boat's own choices; an
@@ -180,6 +183,10 @@ def check_attachment(name, attachment, package=None):
         if chosen not in package.fitting_sets(PROVIDERS[name]):
             raise playbook.PlaybookError(f"{package.manifest_path}: model set {chosen!r} uses a provider that "
                                          f"{name} does not enable")
+    try:
+        role_models.check_overrides(package, attachment.get("role_overrides", {}), PROVIDERS[name], lead_role)
+    except ValueError as error:
+        raise playbook.PlaybookError(f"{package.manifest_path}: {error}") from None
     return package, chosen, lead_role
 
 
@@ -193,12 +200,16 @@ def check_state(name, state):
         raise ProfileError("expected the keys lead and playbook" + (f"; unknown {', '.join(unknown)}" if unknown else ""))
     check_row(name, state[PARENT])
     attachment = state.get("playbook")
-    if attachment is not None and (not isinstance(attachment, dict) or set(attachment) != {"path", "model_set", "lead_role"}
+    required = {"path", "model_set", "lead_role"}
+    if attachment is not None and (not isinstance(attachment, dict)
+                                   or not required <= set(attachment)
+                                   or set(attachment) - required - {"role_overrides"}
                                    or not isinstance(attachment["path"], str)
                                    or not all(isinstance(attachment[k], (str, type(None)))
-                                              for k in ("model_set", "lead_role"))):
+                                              for k in ("model_set", "lead_role"))
+                                   or not isinstance(attachment.get("role_overrides", {}), dict)):
         raise ProfileError('playbook must be null or {"path": DIRECTORY, "model_set": NAME or null, '
-                           '"lead_role": ROLE or null}')
+                           '"lead_role": ROLE or null, optional "role_overrides": object}')
     return state
 
 
@@ -359,6 +370,7 @@ def plan(name=None, state=None, warn=None, loaded=None):
     home = Path.home()
     notices = []
     package = model_set = lead_role = None
+    overrides = {}
     reason = "setup has not saved it yet"
     if state is None and name is not None:
         state = read_state(name, missing=None)
@@ -366,6 +378,7 @@ def plan(name=None, state=None, warn=None, loaded=None):
         check_state(name, state)
         try:
             package, model_set, lead_role = loaded or check_attachment(name, state.get("playbook"))
+            overrides = state.get("playbook", {}).get("role_overrides", {}) if package else {}
         except playbook.PlaybookError as error:
             if warn is None:
                 raise
@@ -433,7 +446,8 @@ def plan(name=None, state=None, warn=None, loaded=None):
                 raise ProfileError(f"{override} masks the required global profile")
             lead = state[PARENT]
             sections = [base_skill,
-                        playbook_skills.section(base, package, model_set, lead_role, installed).rstrip() if package else generic,
+                        playbook_skills.section(base, package, model_set, lead_role, installed, overrides).rstrip()
+                        if package else generic,
                         "\n".join(["## Lead model", "",
                                    "The model of this chat and the model every Boat worker opens with:", "",
                                    "| Row | Provider | Model | Option |", "| --- | --- | --- | --- |",
@@ -467,7 +481,8 @@ def plan(name=None, state=None, warn=None, loaded=None):
     elif state is not None:
         roles = {role: playbook_skills.worker_guide(package, role) for role in package.roles} if package else None
         writes[record] = json.dumps({"profile": state, "playbook": package and {
-            "name": package.name, "label": package.label(where=False), "roles": roles}}, indent=2) + "\n"
+            "name": package.name, "label": package.label(where=False), "roles": roles,
+            "assignments": role_models.effective(package, model_set, overrides)}}, indent=2) + "\n"
     writes, removals = reconcile(writes, removals)
     for found in kept:
         notices.append(f"kept your own {found}; it has no t3-boat marker, so it is used in place of the "

@@ -130,7 +130,7 @@ class ChooseSuggestedTests(Suggested, unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("retry, Enter for none, or the path", output)
         result, _ = self.choose("codex-only", None, "agent-playbook", str(self.custom), "rigger", "none")
-        self.assertEqual(result, {"path": str(self.custom), "model_set": None, "lead_role": "rigger"})
+        self.assertEqual(result, {"path": str(self.custom), "model_set": "codex-crew", "lead_role": "rigger"})
 
     def test_retry_after_the_network_returns(self):
         self.use_repository()
@@ -347,15 +347,17 @@ class SetupSuggestedTests(Suggested, unittest.TestCase):
             self.assertTrue(playbook_skills.generated(playbook_skills.skill_path(self.home / ".codex", package, role)))
         self.assertIn("helm guide at", (self.home / ".codex/AGENTS.md").read_text())
 
-    def test_a_failed_download_in_setup_keeps_the_saved_profile(self):
+    def test_a_failed_download_resumes_the_saved_package_and_applies_provider_inheritance(self):
         self.use_repository()
         self.break_network()
         saved = save(self.home, "codex-only", {"path": str(self.custom), "model_set": None, "lead_role": "rigger"})
         before = saved.read_text()
-        code, output = self.run_setup("codex-only", "agent-playbook", "", "", "none", "", "", "")
+        code, output = self.run_setup("codex-only", "agent-playbook", "", "", "", "", "")
         self.assertEqual(code, 0, output)
         self.assertIn("could not be downloaded", output)
-        self.assertEqual(json.loads(saved.read_text())["playbook"], json.loads(before)["playbook"])
+        expected = json.loads(before)["playbook"]
+        expected["model_set"] = "codex-crew"
+        self.assertEqual(json.loads(saved.read_text())["playbook"], expected)
         self.assertFalse(self.target.exists())
 
     def test_setup_without_a_playbook_stays_generic_and_offline(self):
